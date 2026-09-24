@@ -1,0 +1,37 @@
+@import 'tailwindcss';
+
+@source '../../vendor/laravel/framework/src/Illuminate/Pagination/resources/views/*.blade.php';
+@source '../../storage/framework/views/*.php';
+@source '../**/*.blade.php';
+@source '../**/*.js';
+
+@theme {
+    --font-sans: 'Instrument Sans', ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji',
+        'Segoe UI Symbol', 'Noto Color Emoji';
+}
+
+/* Hard fallbacks — Tailwind purge previously dropped these and emptied the admin UI */
+@layer utilities {
+    .table-cell { display: table-cell; }
+    .sm\:table-cell {
+        @media (width >= 40rem) { display: table-cell; }
+    }
+    .md\:table-cell {
+        @media (width >= 48rem) { display: table-cell; }
+    }
+    .md\:flex {
+        @media (width >= 48rem) { display: flex; }
+    }
+    .md\:hidden {
+        @media (width >= 48rem) { display: none; }
+    }
+    .sm\:flex {
+        @media (width >= 40rem) { display: flex; }
+    }
+    .sm\:block {
+        @media (width >= 40rem) { display: block; }
+    }
+    .sm\:inline {
+        @media (width >= 40rem) { display: inline; }
+    }
+}
