@@ -4,6 +4,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
     <title>@yield('title', 'لوحة التحكم') — {{ config('app.name') }}</title>
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -15,8 +16,12 @@
     @if (file_exists(public_path('build/manifest.json')) || file_exists(public_path('hot')))
         @vite(['resources/css/app.css', 'resources/js/app.js'])
     @else
+        {{-- Production must ship public/build — CDN fallback is CSS-only and breaks Excel/presets/annotate --}}
         <script src="https://cdn.tailwindcss.com"></script>
         <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
+        @if (app()->environment('production'))
+            <meta name="gis-missing-vite-build" content="1">
+        @endif
     @endif
 
     <style>
@@ -52,7 +57,7 @@
     <header class="sticky top-0 z-40 border-b border-white/5 bg-slate-950/90 backdrop-blur-xl">
         <div class="mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 py-3 sm:px-6">
             <a href="{{ route('admin.reports.index') }}" class="flex items-center gap-2 text-lg font-bold text-white sm:text-xl">
-                <img src="{{ asset('images/newLog.jpeg') }}" alt="GIS Logo" class="h-9 w-9 rounded-lg object-contain bg-white p-0.5">
+                <img src="{{ asset('images/newLog.jpeg') }}" alt="GIS Logo" class="h-11 w-auto max-w-[140px] rounded-lg object-contain bg-white p-0.5">
                 <span><span class="text-emerald-500">GIS</span> <span class="hidden xs:inline sm:inline">تقارير الكهرباء</span></span>
             </a>
 
@@ -60,10 +65,12 @@
                 <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
             </button>
 
-            <nav class="hidden items-center gap-4 md:flex">
+            <nav class="hidden items-center gap-3 md:flex">
                 <a href="{{ route('admin.reports.index') }}"
                     class="text-sm font-semibold {{ request()->routeIs('admin.reports.*') ? 'text-emerald-400' : 'text-slate-400 hover:text-white' }}">التقارير</a>
                 <a href="{{ route('admin.reports.create') }}" class="text-sm font-semibold text-slate-400 hover:text-white">تقرير جديد</a>
+                <a href="{{ route('admin.presets.index') }}"
+                    class="text-sm font-semibold {{ request()->routeIs('admin.presets.*') ? 'text-emerald-400' : 'text-slate-400 hover:text-white' }}">الوصف والتعليقات</a>
                 <a href="{{ route('home') }}" class="text-sm font-semibold text-slate-400 hover:text-white">الموقع</a>
                 <form method="post" action="{{ route('logout') }}">@csrf
                     <button class="rounded-lg bg-slate-800 px-3 py-1.5 text-xs font-bold text-white hover:bg-slate-700">خروج</button>
@@ -75,6 +82,7 @@
             <div class="flex flex-col gap-2">
                 <a href="{{ route('admin.reports.index') }}" class="rounded-lg px-3 py-2 text-sm font-semibold text-slate-200 hover:bg-slate-800">التقارير</a>
                 <a href="{{ route('admin.reports.create') }}" class="rounded-lg px-3 py-2 text-sm font-semibold text-slate-200 hover:bg-slate-800">تقرير جديد</a>
+                <a href="{{ route('admin.presets.index') }}" class="rounded-lg px-3 py-2 text-sm font-semibold text-slate-200 hover:bg-slate-800">الوصف والتعليقات</a>
                 <a href="{{ route('home') }}" class="rounded-lg px-3 py-2 text-sm font-semibold text-slate-200 hover:bg-slate-800">الموقع العام</a>
                 <form method="post" action="{{ route('logout') }}">@csrf
                     <button class="w-full rounded-lg bg-slate-800 px-3 py-2 text-sm font-bold text-white">تسجيل الخروج</button>

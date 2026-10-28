@@ -4,9 +4,19 @@
 
 @section('content')
 <div
+    x-data="sectionAnnotate"
+    @annotate-image.window="openEditor({
+        url: $event.detail.url,
+        path: $event.detail.path,
+        action: (@js(route('admin.reports.sections.image', [$report, 0]))).replace(/\/0\/image$/, '/' + $event.detail.sectionId + '/image')
+    })"
+>
+<div
     x-data="reportShowPage({
         storeUrl: @js(route('admin.reports.sections.store', $report)),
-        editMap: @js($report->sections->mapWithKeys(fn ($s) => [$s->id => $s->toEditorPayload()]))
+        editMap: @js($report->sections->mapWithKeys(fn ($s) => [$s->id => $s->toEditorPayload()])),
+        presetDescriptions: @js($presetDescriptions ?? []),
+        presetComments: @js($presetComments ?? []),
     })"
     @keydown.escape.window="if (open) closeModal()"
 >
@@ -63,10 +73,18 @@
                     </div>
                 </div>
 
-                @if ($section->imageUrls())
-                    <div class="mb-3 flex gap-1.5 overflow-x-auto">
-                        @foreach (array_slice($section->imageUrls(), 0, 3) as $url)
-                            <img src="{{ $url }}" alt="" class="h-16 w-20 shrink-0 rounded-lg border border-slate-700 object-cover bg-slate-800">
+                @php $sectionImages = $section->imageEntries(); @endphp
+                @if ($sectionImages !== [])
+                    <div class="mb-3 flex gap-1.5 overflow-x-auto pb-1">
+                        @foreach ($sectionImages as $img)
+                            <div class="relative shrink-0">
+                                <img src="{{ $img['url'] }}" alt="" class="h-16 w-20 rounded-lg border border-slate-700 object-contain bg-slate-950">
+                                <button type="button"
+                                    class="absolute inset-x-0 bottom-0 bg-black/70 text-[9px] font-bold text-emerald-300"
+                                    @click="$dispatch('annotate-image', { url: @js($img['url']), path: @js($img['path']), sectionId: {{ $section->id }} })">
+                                    سهم
+                                </button>
+                            </div>
                         @endforeach
                     </div>
                 @endif
@@ -151,46 +169,30 @@
                                 placeholder="لوحة التوزيع في الطابق الأرضي">
                         </div>
 
-                        {{-- Description with saved presets --}}
-                        <div x-data="presetsWidget('descriptions')" class="space-y-1.5">
-                            <div class="flex items-center justify-between">
+                        {{-- Description — pick from ready presets page --}}
+                        <div class="space-y-1.5">
+                            <div class="flex items-center justify-between gap-2">
                                 <label class="text-sm font-medium text-slate-300">الوصف</label>
                                 <div class="flex items-center gap-2">
-                                    <button type="button" @click="showPresets = !showPresets"
-                                        class="flex items-center gap-1 rounded-lg border border-slate-600 px-2 py-1 text-[11px] font-semibold text-slate-300 hover:border-emerald-500 hover:text-emerald-400 transition-colors">
-                                        <svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
-                                        محفوظات (<span x-text="presets.length"></span>)
-                                    </button>
-                                    <button type="button" @click="savePreset($root.querySelector('[name=description]').value)"
-                                        title="حفظ الوصف الحالي"
-                                        class="flex items-center gap-1 rounded-lg border border-emerald-500/40 px-2 py-1 text-[11px] font-semibold text-emerald-400 hover:bg-emerald-500/10 transition-colors">
-                                        <svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
-                                        حفظ
+                                    <a href="{{ route('admin.presets.index', ['tab' => 'descriptions']) }}" target="_blank"
+                                        class="text-[11px] font-semibold text-slate-400 hover:text-emerald-400">إدارة الأوصاف ↗</a>
+                                    <button type="button" @click="showDescPicker = !showDescPicker"
+                                        class="rounded-lg border border-slate-600 px-2 py-1 text-[11px] font-semibold text-slate-300 hover:border-emerald-500 hover:text-emerald-400">
+                                        اختيار جاهز (<span x-text="presetDescriptions.length"></span>)
                                     </button>
                                 </div>
                             </div>
-
-                            {{-- Presets dropdown --}}
-                            <div x-show="showPresets && presets.length" x-cloak
-                                class="max-h-36 overflow-y-auto rounded-xl border border-slate-700 bg-slate-950 p-1.5 space-y-1">
-                                <template x-for="(p, i) in presets" :key="i">
-                                    <div class="flex items-start gap-1.5 rounded-lg px-2 py-1.5 hover:bg-slate-800 group">
-                                        <button type="button" @click="applyPreset(p, $dispatch)"
-                                            class="flex-1 text-right text-xs text-slate-300 group-hover:text-white line-clamp-2"
-                                            x-text="p"></button>
-                                        <button type="button" @click="removePreset(i)"
-                                            class="shrink-0 text-rose-500 hover:text-rose-400 text-xs leading-none mt-0.5">×</button>
-                                    </div>
+                            <div x-show="showDescPicker" x-cloak class="max-h-40 space-y-1 overflow-y-auto rounded-xl border border-slate-700 bg-slate-950 p-1.5">
+                                <template x-if="!presetDescriptions.length">
+                                    <p class="px-2 py-3 text-center text-xs text-slate-500">لا أوصاف جاهزة — أضفها من صفحة «الوصف والتعليقات»</p>
+                                </template>
+                                <template x-for="(p, i) in presetDescriptions" :key="'pd'+i">
+                                    <button type="button" @click="pickDescription(p)"
+                                        class="block w-full rounded-lg px-2 py-2 text-right text-xs leading-relaxed text-slate-200 hover:bg-emerald-500/15 hover:text-emerald-300"
+                                        x-text="p"></button>
                                 </template>
                             </div>
-                            <div x-show="showPresets && !presets.length" x-cloak
-                                class="rounded-xl border border-dashed border-slate-700 px-3 py-2 text-center text-xs text-slate-500">
-                                لا يوجد محفوظات بعد — اكتب وصفاً ثم اضغط «حفظ»
-                            </div>
-
-                            <textarea name="description" x-model="description"
-                                @preset-selected.window="if($event.detail.type==='descriptions') description = $event.detail.value"
-                                rows="2"
+                            <textarea name="description" x-model="description" rows="2"
                                 class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-white focus:border-emerald-500 focus:outline-none"
                                 placeholder="تقرير لوحة التوزيع..."></textarea>
                         </div>
@@ -202,15 +204,22 @@
                             <template x-if="existingImages.length">
                                 <div class="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
                                     <template x-for="img in existingImages" :key="img.path">
-                                        <label class="relative overflow-hidden rounded-xl border border-slate-700"
+                                        <div class="relative overflow-hidden rounded-xl border border-slate-700"
                                             :class="isRemoved(img.path) ? 'opacity-40 ring-2 ring-rose-500' : ''">
-                                            <img :src="img.url" class="h-24 w-full object-cover" alt="">
-                                            <span class="absolute inset-x-0 bottom-0 flex items-center gap-1.5 bg-black/75 px-2 py-1 text-[10px] text-rose-200">
-                                                <input type="checkbox" name="remove_images[]" :value="img.path"
-                                                    @change="toggleRemoveImage(img.path)" :checked="isRemoved(img.path)">
-                                                حذف
-                                            </span>
-                                        </label>
+                                            <img :src="img.url" class="h-28 w-full object-contain bg-slate-950" alt="">
+                                            <div class="absolute inset-x-0 bottom-0 flex items-center justify-between gap-1 bg-black/80 px-1.5 py-1">
+                                                <label class="flex items-center gap-1 text-[10px] text-rose-200">
+                                                    <input type="checkbox" name="remove_images[]" :value="img.path"
+                                                        @change="toggleRemoveImage(img.path)" :checked="isRemoved(img.path)">
+                                                    حذف
+                                                </label>
+                                                <button type="button"
+                                                    class="rounded bg-emerald-500/90 px-1.5 py-0.5 text-[10px] font-bold text-slate-950"
+                                                    @click="$dispatch('annotate-image', { url: img.url, path: img.path, sectionId: editingId })">
+                                                    سهم
+                                                </button>
+                                            </div>
+                                        </div>
                                     </template>
                                 </div>
                             </template>
@@ -218,34 +227,34 @@
                     </div>
 
                     {{-- STEP 2 --}}
-                    <div x-show="step === 2" class="space-y-3">
-                        <div x-data="presetsWidget('comments')" class="space-y-2">
-                            <div class="flex items-center justify-between">
-                                <p class="text-sm text-slate-300">أضف تعليقات واختر لون كل تعليق (أحمر = يحتاج إصلاح).</p>
-                                <div class="flex items-center gap-2">
-                                    <button type="button" @click="showPresets = !showPresets"
-                                        class="flex items-center gap-1 rounded-lg border border-slate-600 px-2 py-1 text-[11px] font-semibold text-slate-300 hover:border-emerald-500 hover:text-emerald-400 transition-colors">
-                                        <svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
-                                        تعليقات محفوظة (<span x-text="presets.length"></span>)
-                                    </button>
-                                    <button type="button" @click="addComment()" class="text-xs font-bold text-emerald-400">+ تعليق</button>
-                                </div>
+                    <div x-show="step === 2" class="space-y-3"
+                        @add-comment-from-preset.window="comments.push({ text: $event.detail.text || '', color: $event.detail.color || 'none' })">
+                        <div class="flex items-center justify-between gap-2">
+                            <p class="text-sm text-slate-300">أضف تعليقات واختر لون كل تعليق (أحمر = يحتاج إصلاح).</p>
+                            <div class="flex items-center gap-2">
+                                <a href="{{ route('admin.presets.index', ['tab' => 'comments']) }}" target="_blank"
+                                    class="text-[11px] font-semibold text-slate-400 hover:text-emerald-400">إدارة التعليقات ↗</a>
+                                <button type="button" @click="showCommentPicker = !showCommentPicker"
+                                    class="rounded-lg border border-slate-600 px-2 py-1 text-[11px] font-semibold text-slate-300 hover:border-emerald-500 hover:text-emerald-400">
+                                    اختيار جاهز (<span x-text="presetComments.length"></span>)
+                                </button>
+                                <button type="button" @click="addComment()" class="text-xs font-bold text-emerald-400">+ تعليق</button>
                             </div>
+                        </div>
 
-                            {{-- Saved comments presets --}}
-                            <div x-show="showPresets && presets.length" x-cloak
-                                class="max-h-40 overflow-y-auto rounded-xl border border-slate-700 bg-slate-950 p-1.5 space-y-1">
-                                <p class="px-2 text-[10px] text-slate-500">اضغط على التعليق لإضافته للقائمة أدناه:</p>
-                                <template x-for="(p, i) in presets" :key="i">
-                                    <div class="flex items-start gap-1.5 rounded-lg px-2 py-1.5 hover:bg-slate-800 group">
-                                        <button type="button" @click="addCommentFromPreset(p)"
-                                            class="flex-1 text-right text-xs text-slate-300 group-hover:text-white line-clamp-2"
-                                            x-text="p.text + (p.color !== 'none' ? ' (' + (p.color==='green'?'أخضر':'أحمر') + ')' : '')"></button>
-                                        <button type="button" @click="removePreset(i)"
-                                            class="shrink-0 text-rose-500 hover:text-rose-400 text-xs leading-none mt-0.5">×</button>
-                                    </div>
-                                </template>
-                            </div>
+                        <div x-show="showCommentPicker" x-cloak class="max-h-44 space-y-1 overflow-y-auto rounded-xl border border-slate-700 bg-slate-950 p-1.5">
+                            <template x-if="!presetComments.length">
+                                <p class="px-2 py-3 text-center text-xs text-slate-500">لا تعليقات جاهزة — أضفها من صفحة «الوصف والتعليقات»</p>
+                            </template>
+                            <template x-for="(p, i) in presetComments" :key="'pc'+i">
+                                <button type="button"
+                                    @click="pickComment(p)"
+                                    class="block w-full rounded-lg px-2 py-2 text-right text-xs leading-relaxed text-slate-200 hover:bg-emerald-500/15 hover:text-emerald-300">
+                                    <span x-text="p.text"></span>
+                                    <span class="ms-1 text-[10px] opacity-60"
+                                        x-text="p.color === 'red' ? '(أحمر)' : (p.color === 'green' ? '(أخضر)' : '')"></span>
+                                </button>
+                            </template>
                         </div>
 
                         <template x-for="(c, idx) in comments" :key="idx">
@@ -268,22 +277,10 @@
                                         </template>
                                         <input type="hidden" :name="`comments[${idx}][color]`" :value="c.color">
                                     </div>
-                                    <div class="flex items-center gap-2">
-                                        {{-- Save this comment as preset --}}
-                                        <button type="button"
-                                            @click="$dispatch('save-comment-preset', {text: c.text, color: c.color})"
-                                            title="حفظ هذا التعليق"
-                                            class="text-[11px] text-emerald-500 hover:text-emerald-400">حفظ ↑</button>
-                                        <button type="button" @click="comments.splice(idx,1)" class="text-xs text-rose-400">حذف</button>
-                                    </div>
+                                    <button type="button" @click="comments.splice(idx,1)" class="text-xs text-rose-400">حذف</button>
                                 </div>
                             </div>
                         </template>
-
-                        {{-- Listen for save-comment-preset events --}}
-                        <div x-data="presetsWidget('comments')"
-                            @save-comment-preset.window="savePreset($event.detail)"
-                            class="hidden"></div>
                     </div>
                     {{-- STEP 3 --}}
                     <div x-show="step === 3" class="space-y-4">
@@ -423,54 +420,67 @@
                             <div x-show="tableType === 'mcb_panel'" class="space-y-3">
 
                                 <p class="text-xs text-slate-500">
-                                    كل صف = دائرة يسار + دائرة يمين.
-                                    <span class="text-emerald-400 font-semibold">Valid / Yes / نعم</span> → أخضر تلقائي ·
-                                    <span class="text-red-400 font-semibold">Invalid / No / لا</span> → أحمر تلقائي.
+                                    كل مجموعة = قاطع حماية (ELCB). ترتيب الأعمدة مثل التقرير:
+                                    <span class="font-semibold text-slate-300">MCB → Cable → Status</span>
+                                    (يسار ثم يمين). العمود # في الإكسل يُتجاهل عمداً.
+                                </p>
+                                <p class="text-[11px] text-slate-500" x-show="mcbGroups.length > 1">
+                                    عدد القواطع المستوردة:
+                                    <span class="font-bold text-emerald-400" x-text="mcbGroups.length"></span>
                                 </p>
 
                                 <template x-for="(g, gi) in mcbGroups" :key="gi">
                                     <div class="rounded-xl border border-slate-700 bg-slate-950/40 p-3">
-                                        <div class="mb-3 grid gap-2 sm:grid-cols-3">
+                                        <div class="mb-2 flex items-center justify-between gap-2">
+                                            <span class="rounded-md bg-emerald-500/15 px-2 py-0.5 text-[10px] font-bold text-emerald-400"
+                                                x-text="'قاطع ' + (gi + 1) + ' / ' + mcbGroups.length"></span>
+                                            <span class="truncate text-[10px] text-slate-500" x-show="g.source_sheet"
+                                                x-text="g.source_sheet"></span>
+                                        </div>
+                                        <div class="mb-3 space-y-2">
                                             <div>
-                                                <label class="mb-0.5 block text-[10px] text-slate-500">ELCB</label>
+                                                <label class="mb-0.5 block text-[10px] text-slate-500">ELCB / الطابق</label>
                                                 <input :name="`mcb_groups[${gi}][elcb]`" x-model="g.elcb"
-                                                    class="w-full rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm text-white">
-                                            </div>
-                                            <div>
-                                                <label class="mb-0.5 block text-[10px] text-slate-500">Have Label?</label>
-                                                <input :name="`mcb_groups[${gi}][have_label_value]`" x-model="g.have_label_value"
-                                                    @change="applyAutoColor(g, 'have_label_value')"
                                                     class="w-full rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm text-white"
-                                                    :class="{
-                                                        'border-emerald-500/60 text-emerald-300': g.have_label_color === 'green' && g.have_label_value,
-                                                        'border-red-500/60 text-red-300':     g.have_label_color === 'red'   && g.have_label_value
-                                                    }">
+                                                    dir="rtl">
                                             </div>
-                                            <div>
-                                                <label class="mb-0.5 block text-[10px] text-slate-500">لون Label</label>
-                                                <select :name="`mcb_groups[${gi}][have_label_color]`" x-model="g.have_label_color"
-                                                    class="w-full rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm text-white"
-                                                    :class="{
-                                                        'bg-emerald-900/40 text-emerald-300': g.have_label_color === 'green',
-                                                        'bg-red-900/40 text-red-300':         g.have_label_color === 'red'
-                                                    }">
-                                                    <option value="green">أخضر ✓</option>
-                                                    <option value="red">أحمر ✗</option>
-                                                    <option value="none">بدون —</option>
-                                                </select>
+                                            <div class="grid gap-2 sm:grid-cols-2">
+                                                <div>
+                                                    <label class="mb-0.5 block text-[10px] text-slate-500">Have Label?</label>
+                                                    <input :name="`mcb_groups[${gi}][have_label_value]`" x-model="g.have_label_value"
+                                                        @change="applyAutoColor(g, 'have_label_value')"
+                                                        class="w-full rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm text-white"
+                                                        :class="{
+                                                            'border-emerald-500/60 text-emerald-300': g.have_label_color === 'green' && g.have_label_value,
+                                                            'border-red-500/60 text-red-300':     g.have_label_color === 'red'   && g.have_label_value
+                                                        }">
+                                                </div>
+                                                <div>
+                                                    <label class="mb-0.5 block text-[10px] text-slate-500">لون Label</label>
+                                                    <select :name="`mcb_groups[${gi}][have_label_color]`" x-model="g.have_label_color"
+                                                        class="w-full rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm text-white"
+                                                        :class="{
+                                                            'bg-emerald-900/40 text-emerald-300': g.have_label_color === 'green',
+                                                            'bg-red-900/40 text-red-300':         g.have_label_color === 'red'
+                                                        }">
+                                                        <option value="green">أخضر ✓</option>
+                                                        <option value="red">أحمر ✗</option>
+                                                        <option value="none">بدون —</option>
+                                                    </select>
+                                                </div>
                                             </div>
                                         </div>
-                                        <div class="overflow-x-auto">
+                                        <div class="overflow-x-auto" dir="ltr">
                                             <table class="min-w-[640px] w-full text-[10px]">
                                                 <thead class="text-slate-500">
                                                     <tr>
-                                                        <th class="px-1 py-1" colspan="3">يسار</th>
-                                                        <th class="px-1 py-1" colspan="3">يمين</th>
+                                                        <th class="px-1 py-1 text-center" colspan="3">Left</th>
+                                                        <th class="px-1 py-1 text-center" colspan="3">Right</th>
                                                         <th></th>
                                                     </tr>
                                                     <tr>
-                                                        <th>MCB</th><th>Cable</th><th>Status</th>
-                                                        <th>MCB</th><th>Cable</th><th>Status</th>
+                                                        <th>MCB Rating</th><th>Cable Size</th><th>Status</th>
+                                                        <th>MCB Rating</th><th>Cable Size</th><th>Status</th>
                                                         <th></th>
                                                     </tr>
                                                 </thead>
@@ -659,5 +669,52 @@
             </form>
         </div>
     </div>
+</div>
+
+{{-- Image annotate modal --}}
+<div x-show="open" x-cloak class="fixed inset-0 z-[90] flex items-center justify-center p-4" role="dialog" aria-modal="true">
+    <div class="absolute inset-0 bg-black/80" @click="close()"></div>
+    <div class="relative z-10 flex max-h-[95vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-slate-700 bg-slate-900 shadow-2xl">
+        <div class="flex items-center justify-between border-b border-slate-800 px-4 py-3">
+            <h3 class="font-bold text-white">تعديل الصورة — إضافة سهم</h3>
+            <button type="button" class="text-slate-400 hover:text-white" @click="close()">إغلاق</button>
+        </div>
+        <div class="grid gap-4 overflow-y-auto p-4 lg:grid-cols-12">
+            <div class="lg:col-span-8 flex justify-center">
+                <div class="relative overflow-hidden rounded-xl border border-emerald-500/30 bg-black/40"
+                    x-ref="viewport" @click="onViewportClick($event)">
+                    <img x-ref="img" :src="imageUrl" alt="" class="block select-none" draggable="false"
+                        @load="setupViewport()">
+                    <svg x-ref="svg" class="pointer-events-auto absolute inset-0 h-full w-full" viewBox="0 0 1000 1000" preserveAspectRatio="none"></svg>
+                    <template x-for="(a, i) in arrows" :key="i">
+                        <div data-drag-handle
+                            class="absolute z-10 h-6 w-6 -translate-x-1/2 -translate-y-1/2 cursor-grab rounded-full border border-white/60 bg-red-500/40"
+                            :style="`left:${a.x * viewW}px; top:${a.y * viewH}px`"
+                            @mousedown="startDrag($event, i)"></div>
+                    </template>
+                </div>
+            </div>
+            <aside class="space-y-3 lg:col-span-4">
+                <p class="text-xs text-slate-400">أضف سهماً ثم اسحبه أو انقر على الصورة لنقل رأس السهم.</p>
+                <div>
+                    <label class="mb-1 block text-xs text-slate-400">حجم السهم</label>
+                    <input type="range" min="0.4" max="2.5" step="0.05" x-model.number="arrowSize" @input="syncSelectedStyle()" class="w-full accent-emerald-500">
+                </div>
+                <div>
+                    <label class="mb-1 block text-xs text-slate-400">زاوية السهم</label>
+                    <input type="range" min="-180" max="180" step="1" x-model.number="arrowAngle" @input="syncSelectedStyle()" class="w-full accent-sky-500">
+                </div>
+                <div class="grid grid-cols-2 gap-2">
+                    <button type="button" @click="addArrow()" class="rounded-xl bg-emerald-500 py-2 text-xs font-bold text-slate-950">+ سهم</button>
+                    <button type="button" @click="removeSelected()" class="rounded-xl border border-rose-500/40 py-2 text-xs font-bold text-rose-400">حذف المحدد</button>
+                </div>
+                <button type="button" @click="clearArrows()" class="w-full rounded-xl border border-slate-700 py-2 text-xs text-slate-300">مسح كل الأسهم</button>
+                <button type="button" @click="save()" :disabled="saving"
+                    class="w-full rounded-xl bg-white py-2.5 text-sm font-bold text-slate-950 hover:bg-emerald-300 disabled:opacity-50"
+                    x-text="saving ? 'جاري الحفظ...' : 'حفظ الصورة في التقرير'"></button>
+            </aside>
+        </div>
+    </div>
+</div>
 </div>
 @endsection

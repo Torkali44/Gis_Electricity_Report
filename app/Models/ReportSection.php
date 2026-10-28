@@ -92,20 +92,29 @@ class ReportSection extends Model
     }
 
     /** @return list<string> public URLs */
-    public function imageUrls(): array
+    /** @return list<array{path: string, url: string}> */
+    public function imageEntries(): array
     {
         $paths = is_array($this->images_json) ? $this->images_json : [];
-        $urls = [];
+        $entries = [];
         foreach ($paths as $path) {
             $path = ltrim((string) $path, '/');
             if ($path === '' || ! Storage::disk('public')->exists($path)) {
                 continue;
             }
-            // asset() works regardless of APP_URL host mismatches
-            $urls[] = asset('storage/'.$path);
+            $entries[] = [
+                'path' => $path,
+                'url' => asset('storage/'.$path),
+            ];
         }
 
-        return $urls;
+        return $entries;
+    }
+
+    /** @return list<string> */
+    public function imageUrls(): array
+    {
+        return array_column($this->imageEntries(), 'url');
     }
 
     public function deleteStoredImages(): void
@@ -122,17 +131,7 @@ class ReportSection extends Model
     public function toEditorPayload(): array
     {
         $tableData = is_array($this->table_data) ? $this->table_data : [];
-        $images = [];
-        foreach ((array) ($this->images_json ?? []) as $path) {
-            $path = ltrim((string) $path, '/');
-            if ($path === '' || ! Storage::disk('public')->exists($path)) {
-                continue;
-            }
-            $images[] = [
-                'path' => $path,
-                'url' => asset('storage/'.$path),
-            ];
-        }
+        $images = $this->imageEntries();
 
         $mcbGroups = [];
         foreach ($tableData['groups'] ?? [] as $g) {

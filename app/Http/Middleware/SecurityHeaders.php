@@ -17,19 +17,25 @@ class SecurityHeaders
         $response->headers->set('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
         $response->headers->set('X-Frame-Options', 'DENY');
         $response->headers->set('Cross-Origin-Opener-Policy', 'same-origin');
-        $response->headers->set('Content-Security-Policy', implode('; ', [
+        $csp = [
             "default-src 'self'",
             "base-uri 'self'",
             "form-action 'self'",
             "frame-ancestors 'none'",
             "object-src 'none'",
-            "img-src 'self' data:",
+            "img-src 'self' data: blob:",
             "font-src 'self' https://fonts.gstatic.com data:",
             "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
             "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://cdn.jsdelivr.net",
             "connect-src 'self'",
-            "upgrade-insecure-requests",
-        ]));
+        ];
+
+        // Only force HTTPS upgrades in production over HTTPS (breaks local HTTP)
+        if (app()->environment('production') && $request->isSecure()) {
+            $csp[] = 'upgrade-insecure-requests';
+        }
+
+        $response->headers->set('Content-Security-Policy', implode('; ', $csp));
 
         if ($request->isSecure()) {
             $response->headers->set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');

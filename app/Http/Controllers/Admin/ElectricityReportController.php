@@ -74,7 +74,28 @@ class ElectricityReportController extends Controller
                 ]),
         ]);
 
-        return view('admin.reports.show', compact('report'));
+        $presetDescriptions = cache()->remember('ready_presets.descriptions', 300, function () {
+            return \App\Models\ReadyPreset::query()
+                ->where('type', 'description')
+                ->orderBy('sort_order')
+                ->orderByDesc('id')
+                ->pluck('body')
+                ->values()
+                ->all();
+        });
+
+        $presetComments = cache()->remember('ready_presets.comments', 300, function () {
+            return \App\Models\ReadyPreset::query()
+                ->where('type', 'comment')
+                ->orderBy('sort_order')
+                ->orderByDesc('id')
+                ->get(['body', 'color'])
+                ->map(fn ($p) => ['text' => $p->body, 'color' => $p->color ?: 'none'])
+                ->values()
+                ->all();
+        });
+
+        return view('admin.reports.show', compact('report', 'presetDescriptions', 'presetComments'));
     }
 
     public function edit(ElectricityReport $report): View

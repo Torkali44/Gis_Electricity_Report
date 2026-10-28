@@ -20,11 +20,13 @@ function autoColor(value) {
         'good', 'fine', 'acceptable', 'working',
     ];
     const redWords = [
-        'invalid', 'no', 'لا', 'fail', 'failed', 'error', 'bad', 'wrong',
+        'invalid', 'notvalid', 'not valid', 'not_valid', 'no', 'لا',
+        'fail', 'failed', 'error', 'bad', 'wrong',
         'خطأ', 'غير سليم', 'غير موجود', 'معطل', 'تالف', 'لا يعمل',
         'not ok', 'not good', 'fault', 'broken', 'missing',
     ];
 
+    if (/^not\s*valid$/i.test(v) || v === 'notvalid') return 'red';
     if (greenWords.some(w => v === w || v.startsWith(w))) return 'green';
     if (redWords.some(w => v === w || v.startsWith(w)))   return 'red';
 
@@ -67,13 +69,13 @@ function _rgbToLabel(rgb) {
 /**
  * Convert a sheet to [{vals: string[], colors: ('green'|'red'|null)[]}]
  * Handles merged cells by filling the top-left value across the merge range.
+ * Prefers ExcelJS-style fill when provided via optional colorMap.
  */
-function _sheetToMatrix(sheet) {
+function _sheetToMatrix(sheet, colorMap = null) {
     if (!sheet || !sheet['!ref']) return [];
     const range   = XLSX.utils.decode_range(sheet['!ref']);
     const merges  = sheet['!merges'] || [];
 
-    // Build merged-cell lookup: cellAddr → value of top-left
     const mergeMap = {};
     for (const m of merges) {
         const topLeft = XLSX.utils.encode_cell({ r: m.s.r, c: m.s.c });
@@ -94,34 +96,199 @@ function _sheetToMatrix(sheet) {
             const cell = sheet[addr];
             const mergedVal = mergeMap[addr];
             vals.push(mergedVal !== undefined ? mergedVal : (cell ? String(cell.v ?? '').trim() : ''));
-            colors.push(cell ? _rgbToLabel(_getCellBgRgb(cell)) : null);
+            let color = colorMap?.[`${R}:${C}`] ?? null;
+            if (!color && cell) color = _rgbToLabel(_getCellBgRgb(cell));
+            colors.push(color);
         }
         rows.push({ vals, colors });
     }
     return rows;
 }
 
+/** Build per-sheet row/col → green|red maps using ExcelJS (reads fills reliably). */
+async function _excelJsColorMaps(arrayBuffer) {
+    try {
+        const ExcelJS = (await import('exceljs')).default;
+        const wb = new ExcelJS.Workbook();
+        await wb.xlsx.load(arrayBuffer);
+        const byName = {};
+        wb.eachSheet((ws) => {
+            const map = {};
+            ws.eachRow({ includeEmpty: true }, (row, rowNumber) => {
+                row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
+                    const fill = cell.fill;
+                    if (!fill || fill.type !== 'pattern') return;
+                    const argb = fill.fgColor?.argb || fill.bgColor?.argb || fill.fgColor?.rgb;
+                    if (!argb) return;
+                    const rgb = (String(argb).length === 8 ? String(argb).slice(2) : String(argb)).toUpperCase();
+                    const label = _rgbToLabel(rgb);
+                    if (label) map[`${rowNumber - 1}:${colNumber - 1}`] = label;
+                });
+            });
+            byName[ws.name] = map;
+        });
+        return byName;
+    } catch (e) {
+        console.warn('ExcelJS color read skipped:', e);
+        return null;
+    }
+}
+
 /** Detect which of the 4 formats the matrix represents. */
 function _detectFormat(matrix) {
+    let sawSummary = false;
     for (const { vals } of matrix) {
         const flat = vals.map(v => String(v).toLowerCase().trim());
+        const raw0 = String(vals[0] ?? '').trim();
 
-        // Grounding table keywords
-        if (flat.some(v => v.includes('فحص التأريض') || v.includes('grounding check') || v.includes('grounding'))) return 'grounding';
-        if (flat.some(v => v.includes('تأريض') || v.includes('ohm'))) return 'grounding';
-        if (flat.some(v => /^[rybRYB]-[rybRYBnN]$/.test(v))) return 'grounding';
+        // Grounding table keywords (check first — Ohm / تأريض)
+        if (flat.some(v => v.includes('فحص التأريض') || v.includes('grounding check'))) return 'grounding';
+        if (flat.some(v => v.includes('هل كابل التأريض') || v.includes('قراءة فحص التأريض'))) return 'grounding';
+        if (flat.some(v => v.includes('تأريض') || /\bohm\b/i.test(v))) return 'grounding';
+        if (flat.some(v => /^[ryb]-[rybn]$/i.test(v))) return 'grounding';
 
-        // MCB Image-1 style: "ELCB" alone in col-0, value in col-3
-        if (flat[0] === 'elcb' && flat.slice(1, 3).every(v => v === '') && flat[3] && flat[3] !== 'elcb') return 'mcb_image';
+        // Arabic / English board detail (لوحة التوزيع export)
+        if (/قاطع\s*الحماية/.test(raw0) || raw0 === 'النوع' || raw0.includes('قيمة القاطع') || raw0.includes('ملف التعريف')) {
+            return 'mcb_image';
+        }
+        if (flat[0] === 'elcb' || flat[0] === 'لوحة التوزيع') return 'mcb_image';
+        if (flat.some(v =>
+            v.includes('mcb rating') || v.includes('validation status') || v.includes('cable size')
+            || v === 'status' || v.includes('have lable') || v.includes('have label')
+        )) {
+            return 'mcb_image';
+        }
 
         // Column-header detailed MCB
         if (flat.some(v => v.includes('mcb left') || v.includes('status left') || v.includes('cable left'))) return 'mcb_detailed';
-        if (flat.some(v => v.includes('mcb rating') || v.includes('validation status') || v.includes('cable size'))) return 'mcb_image';
 
         // Summary format keywords
-        if (flat.some(v => v.includes('صفوف صحيحة') || v.includes('عدد mcb') || v.includes('mcb count'))) return 'mcb_summary';
+        if (flat.some(v => v.includes('صفوف صحيحة') || v.includes('عدد mcb') || v.includes('mcb count') || v.includes('ملخص عام'))) {
+            sawSummary = true;
+        }
     }
-    return 'mcb_summary'; // safest fallback
+    return sawSummary ? 'mcb_summary' : 'mcb_summary';
+}
+
+/** True if value looks like Valid/Invalid status. */
+function _looksLikeStatus(v) {
+    const t = String(v ?? '').trim().toLowerCase().replace(/\s+/g, '');
+    return ['valid', 'invalid', 'notvalid', 'ok', 'fail', 'passed', 'failed'].includes(t)
+        || t === 'سليم' || t === 'غيرسليم';
+}
+
+/** True if value looks like an MCB amp rating (10A, 30A, Spare…). */
+function _looksLikeMcb(v) {
+    const t = String(v ?? '').trim();
+    if (!t) return false;
+    if (/^\d+(\.\d+)?\s*a$/i.test(t)) return true;
+    if (/^spare$/i.test(t)) return true;
+    return false;
+}
+
+/**
+ * Detect left/right column indices from an MCB header row.
+ * Excel لوحة التوزيع uses: Status | Cable | MCB | # | MCB | Cable | Status
+ * Report/UI uses:          MCB | Cable | Status | MCB | Cable | Status
+ */
+function _detectMcbColMap(rowVals) {
+    const lower = rowVals.map(v => String(v ?? '').toLowerCase().trim());
+    const statusIdx = [], cableIdx = [], mcbIdx = [];
+    lower.forEach((v, i) => {
+        if (!v || v === '#') return;
+        if (v === 'status' || v.includes('validation')) statusIdx.push(i);
+        else if (v.includes('cable')) cableIdx.push(i);
+        else if (v.includes('mcb')) mcbIdx.push(i);
+    });
+
+    if (statusIdx.length && cableIdx.length && mcbIdx.length) {
+        // Status | Cable | MCB | # | MCB | Cable | Status
+        if (statusIdx[0] < cableIdx[0] && cableIdx[0] < mcbIdx[0]) {
+            return {
+                left:  { status: statusIdx[0], cable: cableIdx[0], mcb: mcbIdx[0] },
+                right: {
+                    mcb: mcbIdx[1] ?? mcbIdx[0],
+                    cable: cableIdx[1] ?? cableIdx[0],
+                    status: statusIdx[1] ?? statusIdx[0],
+                },
+            };
+        }
+        // MCB | Cable | Status | MCB | Cable | Status
+        if (mcbIdx[0] < cableIdx[0] && cableIdx[0] < statusIdx[0]) {
+            return {
+                left:  { mcb: mcbIdx[0], cable: cableIdx[0], status: statusIdx[0] },
+                right: {
+                    mcb: mcbIdx[1] ?? statusIdx[0] + 1,
+                    cable: cableIdx[1] ?? statusIdx[0] + 2,
+                    status: statusIdx[1] ?? statusIdx[0] + 3,
+                },
+            };
+        }
+    }
+    return null;
+}
+
+/** Infer column map from a data row when header detection fails. */
+function _inferColMapFromData(rowVals) {
+    const v = rowVals.map(x => String(x ?? '').trim());
+    // Status | Cable | MCB | # | MCB | Cable | Status  (7 cols, # in middle)
+    if (v.length >= 7 && _looksLikeStatus(v[0]) && _looksLikeMcb(v[2]) && _looksLikeMcb(v[4]) && _looksLikeStatus(v[6])) {
+        return {
+            left:  { status: 0, cable: 1, mcb: 2 },
+            right: { mcb: 4, cable: 5, status: 6 },
+        };
+    }
+    // MCB | Cable | Status | MCB | Cable | Status
+    if (v.length >= 6 && _looksLikeMcb(v[0]) && _looksLikeStatus(v[2])) {
+        return {
+            left:  { mcb: 0, cable: 1, status: 2 },
+            right: { mcb: 3, cable: 4, status: 5 },
+        };
+    }
+    // Status | Cable | MCB without right side fully present
+    if (v.length >= 3 && _looksLikeStatus(v[0]) && _looksLikeMcb(v[2])) {
+        return {
+            left:  { status: 0, cable: 1, mcb: 2 },
+            right: { mcb: 4, cable: 5, status: 6 },
+        };
+    }
+    return {
+        left:  { mcb: 0, cable: 1, status: 2 },
+        right: { mcb: 3, cable: 4, status: 5 },
+    };
+}
+
+function _defaultMcbColMap() {
+    return {
+        left:  { mcb: 0, cable: 1, status: 2 },
+        right: { mcb: 3, cable: 4, status: 5 },
+    };
+}
+
+/** Normalize Have Label Arabic/English to Yes/No for the report. */
+function _normalizeHaveLabel(value) {
+    const t = String(value ?? '').trim();
+    if (!t) return { value: 'Yes', color: 'green' };
+    const lo = t.toLowerCase();
+    if (t === 'موجود' || t === 'نعم' || lo === 'yes' || lo === 'y') {
+        return { value: 'Yes', color: 'green' };
+    }
+    if (t === 'غير موجود' || t === 'لا' || lo === 'no' || lo === 'n') {
+        return { value: 'No', color: 'red' };
+    }
+    return { value: t, color: _autoColorStr(t) ?? 'green' };
+}
+
+function _normStatus(v) {
+    const t = String(v ?? '').trim();
+    if (!t) return '';
+    if (/^not\s*valid$/i.test(t) || /^notvalid$/i.test(t)) return 'Invalid';
+    return t;
+}
+
+function _cellAt(vals, colors, idx) {
+    if (idx == null || idx < 0) return { v: '', c: null };
+    return { v: String(vals[idx] ?? '').trim(), c: colors[idx] ?? null };
 }
 
 /** True if any val in positions [from, to] is non-empty. */
@@ -141,91 +308,50 @@ function _resolveColor(cellColor, textValue, fallback = 'green') {
 /** Simple alias for autoColor for internal use. */
 function _autoColorStr(v) { return autoColor(v); }
 
-/** Build a normalised MCB row object from raw values + colors. */
+/** Build a normalised MCB row object from raw values + colors. Never invents empty Valid rows. */
 function _buildMcbRow(lm, lmc, lc, lcc, ls, lsc, rm, rmc, rc, rcc, rs, rsc) {
     const n = v => String(v ?? '').trim();
+    const leftMcb = n(lm), leftCable = n(lc), leftStatus = _normStatus(ls);
+    const rightMcb = n(rm), rightCable = n(rc), rightStatus = _normStatus(rs);
     return {
-        left_mcb:           n(lm),
-        left_mcb_color:     _resolveColor(lmc, n(lm)),
-        left_cable:         n(lc),
-        left_cable_color:   _resolveColor(lcc, n(lc)),
-        left_status:        n(ls) || 'Valid',
-        left_status_color:  _resolveColor(lsc, n(ls) || 'Valid'),
-        right_mcb:          n(rm),
-        right_mcb_color:    _resolveColor(rmc, n(rm)),
-        right_cable:        n(rc),
-        right_cable_color:  _resolveColor(rcc, n(rc)),
-        right_status:       n(rs) || 'Valid',
-        right_status_color: _resolveColor(rsc, n(rs) || 'Valid'),
+        left_mcb:           leftMcb,
+        left_mcb_color:     _resolveColor(lmc, leftMcb, leftMcb ? 'green' : 'green'),
+        left_cable:         leftCable,
+        left_cable_color:   _resolveColor(lcc, leftCable, leftCable ? 'green' : 'green'),
+        left_status:        leftStatus,
+        left_status_color:  leftStatus ? _resolveColor(lsc, leftStatus) : 'green',
+        right_mcb:          rightMcb,
+        right_mcb_color:    _resolveColor(rmc, rightMcb, rightMcb ? 'green' : 'green'),
+        right_cable:        rightCable,
+        right_cable_color:  _resolveColor(rcc, rightCable, rightCable ? 'green' : 'green'),
+        right_status:       rightStatus,
+        right_status_color: rightStatus ? _resolveColor(rsc, rightStatus) : 'green',
     };
 }
 
+function _mcbRowHasData(row) {
+    return !!(row.left_mcb || row.left_cable || row.left_status
+        || row.right_mcb || row.right_cable || row.right_status);
+}
+
 export function registerAdminAlpine(Alpine) {
-    /* ─────────────────────────────────────────────────────────────────
-     * presetsWidget — reusable localStorage-backed presets component.
-     * Usage: x-data="presetsWidget('descriptions')"
-     *        x-data="presetsWidget('comments')"
-     * ───────────────────────────────────────────────────────────────── */
-    Alpine.data('presetsWidget', (namespace) => ({
+    Alpine.store('presets', {
+        descriptions: [],
+        comments: [],
+        panel: null,
+
+        hydrate(descriptions = [], comments = []) {
+            this.descriptions = Array.isArray(descriptions) ? descriptions : [];
+            this.comments = Array.isArray(comments) ? comments : [];
+        },
+
+        open(which) { this.panel = this.panel === which ? null : which; },
+        close() { this.panel = null; },
+    });
+
+    /* Keep thin widget for optional local helpers */
+    Alpine.data('presetsWidget', () => ({
         showPresets: false,
-        presets: [],
-        _key: `gis_presets_${namespace}`,
-
-        init() {
-            try {
-                this.presets = JSON.parse(localStorage.getItem(this._key) || '[]');
-            } catch {
-                this.presets = [];
-            }
-        },
-
-        _persist() {
-            localStorage.setItem(this._key, JSON.stringify(this.presets));
-        },
-
-        /** value: string (description) OR {text,color} object (comment) */
-        savePreset(value) {
-            if (!value) return;
-            const str = typeof value === 'string' ? value.trim() : null;
-            const obj = (typeof value === 'object' && value !== null) ? value : null;
-
-            if (str !== null) {
-                if (str === '' || this.presets.includes(str)) return;
-                this.presets.unshift(str);
-            } else if (obj !== null) {
-                const text = (obj.text || '').trim();
-                if (!text) return;
-                const exists = this.presets.some(p => p.text === text && p.color === obj.color);
-                if (exists) return;
-                this.presets.unshift({ text, color: obj.color || 'none' });
-            }
-
-            if (this.presets.length > 30) this.presets = this.presets.slice(0, 30);
-            this._persist();
-            this.showPresets = true;
-            Alpine.store('adminUi').showToast('تم الحفظ في المحفوظات ✓', 'success', 1800);
-        },
-
-        removePreset(i) {
-            this.presets.splice(i, 1);
-            this._persist();
-        },
-
-        /** For descriptions: dispatch event that textarea listens to */
-        applyPreset(value, dispatch) {
-            dispatch('preset-selected', { type: 'descriptions', value });
-            this.showPresets = false;
-        },
-
-        /** For comments: bubble up via window event */
-        addCommentFromPreset(preset) {
-            window.dispatchEvent(new CustomEvent('add-comment-from-preset', {
-                detail: typeof preset === 'string'
-                    ? { text: preset, color: 'none' }
-                    : preset,
-            }));
-            this.showPresets = false;
-        },
     }));
 
     Alpine.store('adminUi', {
@@ -310,6 +436,8 @@ export function registerAdminAlpine(Alpine) {
         storeUrl: config.storeUrl || '',
         formAction: config.storeUrl || '',
         editMap: config.editMap || {},
+        showDescPicker: false,
+        showCommentPicker: false,
         name: '',
         description: '',
         comments: [{ text: '', color: 'none' }],
@@ -325,11 +453,43 @@ export function registerAdminAlpine(Alpine) {
         voltages: defaultVoltages(),
         mcbGroups: [emptyGroup()],
 
+        /* Presets live on the page component so the picker always sees server data */
+        presetDescriptions: Array.isArray(config.presetDescriptions) ? [...config.presetDescriptions] : [],
+        presetComments: Array.isArray(config.presetComments) ? [...config.presetComments] : [],
+
+        init() {
+            const descs = Array.isArray(config.presetDescriptions) ? config.presetDescriptions : [];
+            const comments = Array.isArray(config.presetComments) ? config.presetComments : [];
+            this.presetDescriptions = [...descs];
+            this.presetComments = [...comments];
+            Alpine.store('presets').hydrate(descs, comments);
+
+            window.addEventListener('add-comment-from-preset', (e) => {
+                if (!this.open) return;
+                const { text, color } = e.detail || {};
+                if (text) this.comments.push({ text, color: color || 'none' });
+            });
+        },
+
+        pickDescription(text) {
+            this.description = text || '';
+            this.showDescPicker = false;
+        },
+
+        pickComment(preset) {
+            this.comments.push({
+                text: preset?.text || '',
+                color: preset?.color || 'none',
+            });
+            this.showCommentPicker = false;
+        },
+
         /* ── Excel import state ── */
         excelImporting: false,
         excelFileName: '',
 
-        openCreate() {            this.resetForm();
+        openCreate() {
+            this.resetForm();
             this.editingId = null;
             this.formAction = this.storeUrl;
             this.open = true;
@@ -401,15 +561,6 @@ export function registerAdminAlpine(Alpine) {
 
         prevStep() {
             if (this.step > 1) this.step--;
-        },
-
-        /** Listen for preset comment insertion from presetsWidget */
-        init() {
-            window.addEventListener('add-comment-from-preset', (e) => {
-                if (!this.open) return;
-                const { text, color } = e.detail || {};
-                if (text) this.comments.push({ text, color: color || 'none' });
-            });
         },
 
         /** Expose autoColor to Alpine templates (grounding inputs etc.). */
@@ -501,38 +652,86 @@ export function registerAdminAlpine(Alpine) {
             this.excelFileName  = file.name;
 
             const reader = new FileReader();
-            reader.onload = (e) => {
+            reader.onload = async (e) => {
                 try {
-                    const data = new Uint8Array(e.target.result);
+                    const buffer = e.target.result;
+                    const data = new Uint8Array(buffer);
+                    const colorMaps = await _excelJsColorMaps(buffer);
+
                     const workbook = XLSX.read(data, {
                         type: 'array',
-                        cellStyles: true,   // read fill colours
+                        cellStyles: true,
                         cellNF: false,
                         cellDates: false,
                     });
 
-                    const sheetName = workbook.SheetNames[0];
-                    const sheet     = workbook.Sheets[sheetName];
-                    const matrix    = _sheetToMatrix(sheet);   // [{vals[], colors[]}, …]
+                    const detailGroups = [];
+                    let groundingMatrix = null;
+                    let sawAnyMatrix = false;
 
-                    const fmt = _detectFormat(matrix);
-                    let toastMsg = '';
+                    for (const sheetName of workbook.SheetNames) {
+                        const sheet = workbook.Sheets[sheetName];
+                        const colorMap = colorMaps?.[sheetName] ?? null;
+                        const matrix = _sheetToMatrix(sheet, colorMap);
+                        if (!matrix.length || matrix.every(r => r.vals.every(v => !String(v).trim()))) {
+                            continue;
+                        }
+                        sawAnyMatrix = true;
+                        const fmt = _detectFormat(matrix);
 
-                    if (fmt === 'grounding') {
-                        this._importGrounding(matrix);
-                        toastMsg = `تم استيراد جدول التأريض من "${file.name}"`;
-                    } else if (fmt === 'mcb_image') {
-                        this._importMcbImage(matrix);
-                        toastMsg = `تم استيراد ${this.mcbGroups.length} مجموعة ELCB من "${file.name}"`;
-                    } else if (fmt === 'mcb_detailed') {
-                        this._importMcbDetailed(matrix);
-                        toastMsg = `تم استيراد ${this.mcbGroups.length} مجموعة من "${file.name}"`;
-                    } else {
-                        this._importMcbSummary(matrix);
-                        toastMsg = `تم استيراد ${this.mcbGroups.length} لوحة من "${file.name}"`;
+                        // Skip summary sheet when workbook has detail panels
+                        if (fmt === 'mcb_summary') continue;
+
+                        if (fmt === 'grounding') {
+                            groundingMatrix = matrix;
+                            continue;
+                        }
+                        if (fmt === 'mcb_detailed') {
+                            const groups = this._parseMcbDetailedGroups(matrix);
+                            detailGroups.push(...groups);
+                            continue;
+                        }
+                        if (fmt === 'mcb_image') {
+                            detailGroups.push(...this._parseMcbImageGroups(matrix, sheetName));
+                        }
                     }
 
-                    Alpine.store('adminUi').showToast(toastMsg, 'success');
+                    let toastMsg = '';
+
+                    if (groundingMatrix && !detailGroups.length) {
+                        this._importGrounding(groundingMatrix);
+                        toastMsg = `تم استيراد جدول التأريض من "${file.name}"`;
+                    } else if (detailGroups.length) {
+                        this.mcbGroups = detailGroups;
+                        this.hasTable = true;
+                        this.tableType = 'mcb_panel';
+                        const rows = detailGroups.reduce((n, g) => n + g.rows.length, 0);
+                        const floors = [...new Set(detailGroups.map(g => g.source_sheet).filter(Boolean))];
+                        const floorPart = floors.length ? ` من ${floors.length} طابق` : '';
+                        toastMsg = `تم استيراد ${detailGroups.length} قاطع حماية (${rows} صف)${floorPart} — مطابق لملف الإكسل`;
+                        if (groundingMatrix) {
+                            toastMsg += ' · ملاحظة: شيت التأريض لم يُدمج هنا — أضفه كقسم منفصل';
+                        }
+                        // Fill empty section name from first panel title
+                        if (!String(this.name || '').trim()) {
+                            const titles = [...new Set(detailGroups.map(g => g.panel_title).filter(Boolean))];
+                            if (titles.length === 1) this.name = titles[0];
+                            else if (titles.length > 1) this.name = titles.join(' + ');
+                        }
+                    } else if (!sawAnyMatrix) {
+                        Alpine.store('adminUi').showToast('الملف فارغ أو لا يحتوي بيانات قابلة للقراءة', 'error');
+                        return;
+                    } else {
+                        Alpine.store('adminUi').showToast(
+                            'لم يُعثر على جداول بيانات في الشيتات. تأكد أن الملف يحتوي شيت اللوحة (Status / Cable / MCB) وليس الملخص فقط.',
+                            'warning',
+                        );
+                        return;
+                    }
+
+                    if (this.hasTable) {
+                        Alpine.store('adminUi').showToast(toastMsg, 'success');
+                    }
                 } catch (err) {
                     console.error('Excel import error:', err);
                     Alpine.store('adminUi').showToast('حدث خطأ أثناء قراءة الملف: ' + err.message, 'error');
@@ -545,70 +744,251 @@ export function registerAdminAlpine(Alpine) {
         },
 
         /* ══════════════════════════════════════════
-         * Format A — MCB Image style (Image 1)
+         * Format A — MCB Image / لوحة التوزيع export
+         * Supports:
+         *  - Status|Cable|MCB|#|MCB|Cable|Status
+         *  - MCB|Cable|Status|MCB|Cable|Status
+         *  - Arabic: قاطع الحماية / النوع / قيمة القاطع / ملف التعريف
          * ══════════════════════════════════════════ */
-        _importMcbImage(matrix) {
+        _parseMcbImageGroups(matrix, sheetName = '') {
             const groups = [];
             let cur = null;
             let dataMode = false;
+            let colMap = null;
+            let panelTitle = '';
+            let breakerNo = 0;
+            let elcbType = '';
+            let elcbRating = '';
+
+            const sheetLabel = String(sheetName || '').trim();
+
+            const finalizeElcbLabel = () => {
+                if (!cur) return;
+                const parts = [];
+                if (panelTitle) parts.push(panelTitle);
+                else if (sheetLabel && !/ملخص/.test(sheetLabel)) parts.push(sheetLabel);
+                if (breakerNo) parts.push(`قاطع ${breakerNo}`);
+                const tech = [elcbType, elcbRating].filter(Boolean).join(' / ')
+                    || String(cur.elcb || '').trim()
+                    || 'ELCB';
+                parts.push(tech);
+                cur.elcb = parts.join(' · ');
+                cur.panel_title = panelTitle || sheetLabel || '';
+                cur.source_sheet = sheetLabel;
+                cur.breaker_no = breakerNo || null;
+            };
+
+            const pushCur = () => {
+                if (cur && cur.rows.length > 0) {
+                    finalizeElcbLabel();
+                    groups.push(cur);
+                }
+                cur = null;
+                elcbType = '';
+                elcbRating = '';
+            };
+
+            const ensureGroup = () => {
+                if (!cur) {
+                    cur = {
+                        elcb: 'ELCB',
+                        have_label_value: 'Yes',
+                        have_label_color: 'green',
+                        rows: [],
+                        panel_title: panelTitle || sheetLabel,
+                        source_sheet: sheetLabel,
+                        breaker_no: breakerNo || null,
+                    };
+                }
+            };
+
+            const findElcbValue = (vals) => {
+                for (let i = 1; i < vals.length; i++) {
+                    const t = String(vals[i] ?? '').trim();
+                    if (!t) continue;
+                    const lo = t.toLowerCase();
+                    if (lo.includes('have') || lo.includes('label') || lo.includes('lable')) continue;
+                    if (lo === 'yes' || lo === 'no' || lo === 'نعم' || lo === 'لا') continue;
+                    if (lo.includes('mcb') || lo.includes('cable') || lo.includes('validation') || lo === 'status') continue;
+                    return t;
+                }
+                return '';
+            };
+
+            const findHaveLabel = (vals, colors) => {
+                for (let i = 0; i < vals.length; i++) {
+                    const lo = String(vals[i] ?? '').toLowerCase().trim();
+                    if (!lo.includes('have') && !lo.includes('label') && !lo.includes('lable')) continue;
+                    for (let j = i + 1; j < vals.length; j++) {
+                        const t = String(vals[j] ?? '').trim();
+                        if (!t) continue;
+                        const norm = _normalizeHaveLabel(t);
+                        return { value: norm.value, color: colors[j] ?? norm.color };
+                    }
+                }
+                return null;
+            };
 
             for (const { vals, colors } of matrix) {
-                const v0 = String(vals[0] ?? '').trim();
+                const rowVals = vals.map(v => String(v ?? '').trim());
+                const v0 = rowVals[0] ?? '';
                 const v0lo = v0.toLowerCase();
+                const joined = rowVals.join(' ').toLowerCase();
+                const v1 = rowVals[1] ?? '';
 
-                // ── ELCB header row: "ELCB" in col-0, value in col-3 or col-4
-                if (v0lo === 'elcb' && !_hasData(vals, 1, 2)) {
-                    if (cur) groups.push(cur);
-                    const elcbVal = String(vals[3] ?? vals[4] ?? '').trim();
-                    cur = { elcb: elcbVal, have_label_value: 'Yes', have_label_color: 'green', rows: [] };
+                // Notes / meta rows — stop data mode
+                if (v0.includes('الملاحظات') || v0.includes('التوصيات') || v0 === 'م' || v0.includes('لا توجد ملاحظات')) {
                     dataMode = false;
                     continue;
                 }
 
-                // ── Have Label row
-                if (v0lo.includes('have label') || v0lo.includes('have lable') || v0lo.includes('label')) {
-                    if (cur) {
-                        const valIdx = [3, 4, 1].find(i => String(vals[i] ?? '').trim() !== '') ?? 3;
-                        cur.have_label_value = String(vals[valIdx] ?? '').trim() || 'Yes';
-                        cur.have_label_color = colors[valIdx] ?? _autoColorStr(cur.have_label_value) ?? 'green';
+                // Panel title: لوحة التوزيع | الطابق الأول
+                if (v0 === 'لوحة التوزيع') {
+                    if (v1 && v1 !== '—') panelTitle = v1;
+                    dataMode = false;
+                    continue;
+                }
+                if (v0 === 'الوصف') {
+                    dataMode = false;
+                    continue;
+                }
+
+                // ── Arabic: قاطع الحماية N → new ELCB group
+                if (/قاطع\s*الحماية/.test(v0)) {
+                    pushCur();
+                    const numMatch = v0.match(/(\d+)/) || v1.match(/(\d+)/);
+                    breakerNo = numMatch ? parseInt(numMatch[1], 10) : (breakerNo + 1);
+                    elcbType = '';
+                    elcbRating = '';
+                    cur = {
+                        elcb: 'ELCB',
+                        have_label_value: 'Yes',
+                        have_label_color: 'green',
+                        rows: [],
+                        panel_title: panelTitle || sheetLabel,
+                        source_sheet: sheetLabel,
+                        breaker_no: breakerNo,
+                    };
+                    dataMode = false;
+                    continue;
+                }
+
+                // ── Arabic meta rows under قاطع الحماية
+                if (v0 === 'النوع' && cur) {
+                    if (v1) elcbType = v1;
+                    dataMode = false;
+                    continue;
+                }
+                if ((v0.includes('قيمة القاطع') || v0lo.includes('breaker rating')) && cur) {
+                    if (v1) elcbRating = v1;
+                    dataMode = false;
+                    continue;
+                }
+                if ((v0.includes('ملف التعريف') || v0lo.includes('label file')) && cur) {
+                    if (v1) {
+                        const norm = _normalizeHaveLabel(v1);
+                        cur.have_label_value = norm.value;
+                        cur.have_label_color = colors[1] ?? norm.color;
                     }
                     dataMode = false;
                     continue;
                 }
 
-                // ── Column header row: MCB Rating | Cable Size | Validation Status …
-                if (v0lo.includes('mcb rating') || v0lo.includes('mcb') && v0lo.includes('rating')) {
+                // ── English ELCB header
+                if (v0lo === 'elcb') {
+                    pushCur();
+                    breakerNo += 1;
+                    elcbType = findElcbValue(rowVals) || 'ELCB';
+                    elcbRating = '';
+                    const have = findHaveLabel(rowVals, colors);
+                    cur = {
+                        elcb: elcbType,
+                        have_label_value: have?.value || 'Yes',
+                        have_label_color: have?.color || 'green',
+                        rows: [],
+                        panel_title: panelTitle || sheetLabel,
+                        source_sheet: sheetLabel,
+                        breaker_no: breakerNo,
+                    };
+                    dataMode = false;
+                    continue;
+                }
+
+                // ── Have Label on its own row
+                if (joined.includes('have label') || joined.includes('have lable') || (v0lo.includes('label') && !v0lo.includes('mcb') && !v0.includes('ملف'))) {
+                    ensureGroup();
+                    const have = findHaveLabel(rowVals, colors);
+                    if (have) {
+                        cur.have_label_value = have.value;
+                        cur.have_label_color = have.color;
+                    } else {
+                        const valIdx = rowVals.findIndex((t, i) => i > 0 && t !== '');
+                        if (valIdx >= 0) {
+                            const norm = _normalizeHaveLabel(rowVals[valIdx]);
+                            cur.have_label_value = norm.value;
+                            cur.have_label_color = colors[valIdx] ?? norm.color;
+                        }
+                    }
+                    dataMode = false;
+                    continue;
+                }
+
+                // ── Column header row → detect Status|Cable|MCB vs MCB|Cable|Status
+                const looksLikeHeader = (
+                    (joined.includes('mcb') && joined.includes('cable'))
+                    || (joined.includes('status') && joined.includes('cable'))
+                    || (joined.includes('validation') && joined.includes('cable'))
+                ) && rowVals.filter(v => /status|cable|mcb|validation/i.test(v)).length >= 2;
+
+                if (looksLikeHeader) {
+                    colMap = _detectMcbColMap(rowVals) || _defaultMcbColMap();
                     dataMode = true;
+                    ensureGroup();
                     continue;
                 }
 
                 // ── Data row
                 if (dataMode && cur) {
-                    const rowVals   = vals.map(v => String(v ?? '').trim());
-                    const rowColors = colors;
+                    if (rowVals.every(v => v === '')) continue;
+                    if (v0lo === 'elcb' || /قاطع\s*الحماية/.test(v0)) continue;
 
-                    // Skip truly empty rows
-                    if (rowVals.every(v => v === '')) { dataMode = false; continue; }
+                    // Skip the # index column values being mistaken as full rows without header
+                    if (!colMap) colMap = _inferColMapFromData(rowVals);
+                    // Re-infer if first mapped cells look swapped (Status landed in MCB)
+                    if (_looksLikeStatus(rowVals[colMap.left.mcb]) && _looksLikeMcb(rowVals[colMap.left.status])) {
+                        colMap = _inferColMapFromData(rowVals);
+                    }
 
-                    // Left: cols 0,1,2  |  Right: cols 3,4,5
+                    const L = colMap.left, R = colMap.right;
+                    const lm = _cellAt(rowVals, colors, L.mcb);
+                    const lc = _cellAt(rowVals, colors, L.cable);
+                    const ls = _cellAt(rowVals, colors, L.status);
+                    const rm = _cellAt(rowVals, colors, R.mcb);
+                    const rc = _cellAt(rowVals, colors, R.cable);
+                    const rs = _cellAt(rowVals, colors, R.status);
+
+                    // Never store the circuit index ("1 | 2") as an MCB rating
+                    const scrub = (cell) => (/^\d+\s*\|\s*\d+$/.test(cell.v) ? { v: '', c: null } : cell);
                     const row = _buildMcbRow(
-                        rowVals[0], rowColors[0],   // left MCB
-                        rowVals[1], rowColors[1],   // left cable
-                        rowVals[2], rowColors[2],   // left status
-                        rowVals[3], rowColors[3],   // right MCB
-                        rowVals[4], rowColors[4],   // right cable
-                        rowVals[5], rowColors[5],   // right status
+                        scrub(lm).v, scrub(lm).c, lc.v, lc.c, ls.v, ls.c,
+                        scrub(rm).v, scrub(rm).c, rc.v, rc.c, rs.v, rs.c,
                     );
-                    cur.rows.push(row);
+                    if (_mcbRowHasData(row)) cur.rows.push(row);
                 }
             }
 
-            if (cur && cur.rows.length > 0) groups.push(cur);
+            pushCur();
+            return groups;
+        },
 
+        _importMcbImage(matrix) {
+            const groups = this._parseMcbImageGroups(matrix);
             if (groups.length > 0) {
                 this.mcbGroups = groups;
-                this.hasTable  = true;
+                this.hasTable = true;
                 this.tableType = 'mcb_panel';
+            } else {
+                Alpine.store('adminUi').showToast('لم يتم العثور على صفوف بيانات في ملف MCB', 'warning');
             }
         },
 
@@ -648,13 +1028,21 @@ export function registerAdminAlpine(Alpine) {
                 const readKw  = v => v.includes('قراءة') || v.includes('reading') || v.includes('ohm');
 
                 if (cableKw(alo)) {
-                    // value is in col-B; colour from col-B or col-A
-                    cableValue = b || a;
+                    // Prefer explicit نعم/لا token when cell says "نعم / لا"
+                    let raw = b || a;
+                    if (/نعم/.test(raw) && /لا/.test(raw)) {
+                        raw = (colors[1] === 'red' || colors[0] === 'red') ? 'لا' : 'نعم';
+                    }
+                    cableValue = raw;
                     cableColor = colors[1] ?? colors[0] ?? _autoColorStr(cableValue) ?? 'green';
                     continue;
                 }
                 if (cableKw(blo)) {
-                    cableValue = a;
+                    let raw = a;
+                    if (/نعم/.test(raw) && /لا/.test(raw)) {
+                        raw = colors[0] === 'red' ? 'لا' : 'نعم';
+                    }
+                    cableValue = raw;
                     cableColor = colors[0] ?? _autoColorStr(a) ?? 'green';
                     continue;
                 }
@@ -705,8 +1093,7 @@ export function registerAdminAlpine(Alpine) {
         /* ══════════════════════════════════════════
          * Format C — Column-header detailed MCB
          * ══════════════════════════════════════════ */
-        _importMcbDetailed(matrix) {
-            // Find header row and column map
+        _parseMcbDetailedGroups(matrix) {
             const hkw = {
                 elcb:         ['elcb'],
                 have_label:   ['have label', 'have lable'],
@@ -724,61 +1111,52 @@ export function registerAdminAlpine(Alpine) {
                 const { vals } = matrix[i];
                 const matched = {};
                 vals.forEach((v, ci) => {
-                    const n = String(v).toLowerCase().trim().replace(/\s+/g,' ');
+                    const n = String(v).toLowerCase().trim().replace(/\s+/g, ' ');
                     for (const [k, kws] of Object.entries(hkw)) {
                         if (kws.some(kw => n.includes(kw))) matched[k] = ci;
                     }
                 });
                 if (Object.keys(matched).length >= 3) { headerRow = i; colMap = matched; break; }
             }
-            if (headerRow < 0) { this._importMcbSummary(matrix); return; }
+            if (headerRow < 0) return [];
 
             const groups = {};
-            const order  = [];
+            const order = [];
             const g = (row, k) => colMap[k] !== undefined ? String(row[colMap[k]] ?? '').trim() : '';
             const gc = (colors, k) => colMap[k] !== undefined ? (colors[colMap[k]] ?? null) : null;
 
             for (const { vals, colors } of matrix.slice(headerRow + 1)) {
                 if (vals.every(v => String(v).trim() === '')) continue;
                 const elcb = g(vals, 'elcb') || '300mA';
-                if (!groups[elcb]) { groups[elcb] = { elcb, have_label_value: g(vals,'have_label') || 'Yes', have_label_color: 'green', rows: [] }; order.push(elcb); }
-                groups[elcb].rows.push(_buildMcbRow(
-                    g(vals,'mcb_left'),   gc(colors,'mcb_left'),
-                    g(vals,'cable_left'), gc(colors,'cable_left'),
-                    g(vals,'status_left'),gc(colors,'status_left'),
-                    g(vals,'mcb_right'),  gc(colors,'mcb_right'),
-                    g(vals,'cable_right'),gc(colors,'cable_right'),
-                    g(vals,'status_right'),gc(colors,'status_right'),
-                ));
+                if (!groups[elcb]) {
+                    groups[elcb] = {
+                        elcb,
+                        have_label_value: g(vals, 'have_label') || 'Yes',
+                        have_label_color: 'green',
+                        rows: [],
+                    };
+                    order.push(elcb);
+                }
+                const row = _buildMcbRow(
+                    g(vals, 'mcb_left'), gc(colors, 'mcb_left'),
+                    g(vals, 'cable_left'), gc(colors, 'cable_left'),
+                    g(vals, 'status_left'), gc(colors, 'status_left'),
+                    g(vals, 'mcb_right'), gc(colors, 'mcb_right'),
+                    g(vals, 'cable_right'), gc(colors, 'cable_right'),
+                    g(vals, 'status_right'), gc(colors, 'status_right'),
+                );
+                if (_mcbRowHasData(row)) groups[elcb].rows.push(row);
             }
-            if (order.length > 0) { this.mcbGroups = order.map(k => groups[k]); this.hasTable = true; this.tableType = 'mcb_panel'; }
+            return order.map(k => groups[k]).filter(g => g.rows.length > 0);
         },
 
-        /* ══════════════════════════════════════════
-         * Format D — Summary MCB
-         * ══════════════════════════════════════════ */
-        _importMcbSummary(matrix) {
-            const newGroups = [];
-            for (const { vals } of matrix) {
-                const v = vals.map(c => String(c ?? '').trim());
-                if (v.every(x => x === '')) continue;
-                const nums = v.map(x => { const n = parseFloat(x); return isNaN(n) ? null : n; });
-                const panelName = v.find(x => x && isNaN(parseFloat(x))) || '';
-                const elcbCount = nums.find((n,i) => n !== null && i >= 1) ?? 2;
-                const mcbCount  = nums.find((n,i) => n !== null && i >= 2 && n !== elcbCount) ?? 24;
-                const validRows = nums.find((n,i) => n !== null && i >= 3) ?? mcbCount;
-                const totalRows = Math.ceil(mcbCount / 2);
-                const circuitRows = [];
-                for (let r = 0; r < totalRows; r++) {
-                    const lv = (r*2+1) <= validRows, rv = (r*2+2) <= validRows;
-                    circuitRows.push(_buildMcbRow(
-                        '','green','','green', lv?'Valid':'Invalid', lv?'green':'red',
-                        '','green','','green', rv?'Valid':'Invalid', rv?'green':'red',
-                    ));
-                }
-                newGroups.push({ elcb: `${elcbCount}`, have_label_value: panelName||'Yes', have_label_color:'green', rows: circuitRows.length?circuitRows:[emptyMcbRow()] });
+        _importMcbDetailed(matrix) {
+            const groups = this._parseMcbDetailedGroups(matrix);
+            if (groups.length > 0) {
+                this.mcbGroups = groups;
+                this.hasTable = true;
+                this.tableType = 'mcb_panel';
             }
-            if (newGroups.length > 0) { this.mcbGroups = newGroups; this.hasTable = true; this.tableType = 'mcb_panel'; }
         },
     }));
 }

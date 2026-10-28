@@ -16,18 +16,30 @@ use PhpOffice\PhpWord\Style\Language;
 
 class ElectricityReportWordGenerator
 {
-    private string $logoPath;
+    private ?string $logoPath = null;
 
     public function __construct()
     {
-        // Prefer new logo; fall back to legacy files
-        foreach (['images/newLog.jpeg', 'images/company-logo.png', 'images/company-logo1.png'] as $candidate) {
-            $path = public_path($candidate);
-            if (file_exists($path)) {
-                $this->logoPath = $path;
-                break;
+        $this->logoPath = $this->resolveLogoPath();
+    }
+
+    private function resolveLogoPath(): ?string
+    {
+        $candidates = array_filter([
+            config('report.logo_path'),
+            'images/newLog.jpeg',
+            'images/company-logo.png',
+            'images/company-logo1.png',
+        ]);
+
+        foreach ($candidates as $candidate) {
+            $path = public_path((string) $candidate);
+            if (is_file($path)) {
+                return $path;
             }
         }
+
+        return null;
     }
 
     public function renderBinary(ElectricityReport $report): string
@@ -92,6 +104,16 @@ class ElectricityReportWordGenerator
             ], $rtlCenter);
             $section->addPageBreak();
 
+            // Property / client info on content start
+            $section->addText($report->title, ['bold' => true, 'size' => 13, 'rtl' => true], $rtlCenter);
+            $client = trim((string) ($report->client_name ?: ''));
+            $addr = $report->propertyAddress();
+            $metaLine = trim(($client !== '' ? 'العميل: '.$client : '').($addr !== '---' ? ($client !== '' ? '  —  ' : '').$addr : ''));
+            if ($metaLine !== '') {
+                $section->addText($metaLine, ['size' => 10, 'color' => '555555', 'rtl' => true], $rtlCenter);
+            }
+            $section->addTextBreak(1);
+
             $sections = $report->sections;
             $hasGrounding = $sections->contains(fn (ReportSection $s) => $s->has_table && $s->table_type === 'grounding_main');
             if ($hasGrounding) {
@@ -133,8 +155,9 @@ class ElectricityReportWordGenerator
         ], ['alignment' => Jc::RIGHT, 'bidi' => true]);
 
         $logo = $table->addCell(4000);
-        if (file_exists($this->logoPath)) {
-            $logo->addImage($this->logoPath, ['width' => 70, 'height' => 32, 'alignment' => Jc::LEFT]);
+        if ($this->logoPath && is_file($this->logoPath)) {
+            // Height only — preserve aspect ratio
+            $logo->addImage($this->logoPath, ['height' => 42, 'alignment' => Jc::LEFT]);
         }
     }
 
@@ -144,6 +167,17 @@ class ElectricityReportWordGenerator
         $table = $footer->addTable('FooterBar');
         $table->addRow();
 
+        $ltr = ['alignment' => Jc::LEFT, 'bidi' => false, 'spaceAfter' => 0];
+        $rtlRight = ['alignment' => Jc::RIGHT, 'bidi' => true, 'spaceAfter' => 0];
+        $font = ['bold' => true, 'size' => 8, 'color' => '800000', 'rtl' => false];
+        $fontSm = ['size' => 7, 'color' => '800000', 'rtl' => false];
+        $fontAr = ['bold' => true, 'size' => 8, 'color' => '800000', 'rtl' => true];
+
+        $whatsappIcon = public_path('images/whatsapp_icon.png');
+        $emailIcon = public_path('images/email_icon.png');
+        $instagramIcon = public_path('images/instagram.png');
+
+        // Left: contacts + address
         $contacts = $table->addCell(5600);
         $row = $contacts->addTable([
             'width' => 5500, 'unit' => TblWidth::TWIP, 'layout' => 'fixed',
@@ -151,33 +185,42 @@ class ElectricityReportWordGenerator
         ]);
         $row->addRow();
 
-        $whatsappIcon = public_path('images/whatsapp_icon.png');
-        $emailIcon = public_path('images/email_icon.png');
-        $ltr = ['alignment' => Jc::LEFT, 'bidi' => false, 'spaceAfter' => 0];
-        $font = ['bold' => true, 'size' => 8, 'color' => '800000', 'rtl' => false];
-
-        $waIcon = $row->addCell(400);
+        $waIcon = $row->addCell(380);
         if (is_file($whatsappIcon)) {
             try {
                 $waIcon->addImage($whatsappIcon, ['width' => 11, 'height' => 11]);
             } catch (\Throwable) {
             }
         }
-        $row->addCell(1600)->addText('36698895', $font, $ltr);
+        $row->addCell(1200)->addText('36698895', $font, $ltr);
 
-        $emIcon = $row->addCell(400);
+        $emIcon = $row->addCell(380);
         if (is_file($emailIcon)) {
             try {
                 $emIcon->addImage($emailIcon, ['width' => 11, 'height' => 11]);
             } catch (\Throwable) {
             }
         }
-        $row->addCell(3100)->addText('infogisgulf@gmail.com', $font, $ltr);
+        $row->addCell(2300)->addText('infogisgulf@gmail.com', $font, $ltr);
 
+        $igIcon = $row->addCell(380);
+        if (is_file($instagramIcon)) {
+            try {
+                $igIcon->addImage($instagramIcon, ['width' => 11, 'height' => 11]);
+            } catch (\Throwable) {
+            }
+        }
+        $row->addCell(1400)->addText('gis.Bahrain', $font, $ltr);
+
+        $contacts->addText('Seef District - Kingdom of Bahrain', $fontSm, $ltr);
+
+        // Right: company block
         $company = $table->addCell(4400);
         $company->addText('GIS VALUATION AND EVALUATION', [
             'bold' => true, 'size' => 8, 'color' => '800000', 'rtl' => false,
         ], ['alignment' => Jc::RIGHT, 'bidi' => false, 'spaceAfter' => 0]);
+        $company->addText('جي إي إس للتقييم والتثمين العقاري', $fontAr, $rtlRight);
+        $company->addText('C.R. 160528-1', $fontSm, ['alignment' => Jc::RIGHT, 'bidi' => false, 'spaceAfter' => 0]);
     }
 
     private function renderLegend(Section $section, array $rtlRight): void
@@ -237,19 +280,24 @@ class ElectricityReportWordGenerator
 
             $images = $sec->imageAbsolutePaths();
             if ($images !== []) {
-                foreach (array_chunk($images, 3) as $slice) {
+                // Sample: 5 slots per row; unused slots stay empty (no stretch)
+                $slots = 5;
+                $slotW = (int) floor(9800 / $slots);
+                foreach (array_chunk($images, $slots) as $slice) {
                     $imgTable = $cell->addTable([
                         'width' => 9800, 'unit' => TblWidth::TWIP, 'layout' => 'fixed',
                         'borderSize' => 0, 'borderColor' => 'FFFFFF', 'cellMargin' => 40,
                     ]);
                     $imgTable->addRow();
-                    $w = (int) floor(9800 / count($slice));
-                    foreach ($slice as $imgPath) {
-                        $c = $imgTable->addCell($w);
+                    for ($i = 0; $i < $slots; $i++) {
+                        $c = $imgTable->addCell($slotW);
+                        if (! isset($slice[$i])) {
+                            continue;
+                        }
                         try {
-                            $c->addImage($imgPath, [
-                                'width' => 180,
-                                'height' => 130,
+                            // Width only — keep natural proportions
+                            $c->addImage($slice[$i], [
+                                'width' => 115,
                                 'alignment' => Jc::CENTER,
                             ]);
                         } catch (\Throwable) {

@@ -49,9 +49,9 @@ class ElectricityReportPdfGenerator
             $pdf->SetCreator(config('app.name'));
             $pdf->SetAuthor(config('app.name'));
             $pdf->SetTitle('تقرير فحص الكهرباء — '.$report->title);
-            $pdf->SetMargins($this->left, 26, $this->right);
+            $pdf->SetMargins($this->left, 28, $this->right);
             $pdf->SetHeaderMargin(6);
-            $pdf->SetFooterMargin(18);
+            $pdf->SetFooterMargin(22);
             $pdf->setRTL(true);
             $pdf->SetFont($this->font, '', 11);
             $pdf->setCellPaddings(2, 1.5, 2, 1.5);
@@ -69,8 +69,11 @@ class ElectricityReportPdfGenerator
             // Page 2+: content with header/footer
             $pdf->setPrintHeader(true);
             $pdf->setPrintFooter(true);
-            $pdf->SetAutoPageBreak(true, 24);
+            $pdf->SetAutoPageBreak(true, 28);
             $pdf->AddPage();
+
+            // Property / client info under the cover — used in the exported report
+            $this->renderPropertyInfo($pdf, $report);
 
             $sections = $report->sections;
             $hasGrounding = $sections->contains(
@@ -107,6 +110,24 @@ class ElectricityReportPdfGenerator
         $pdf->SetY(($pageH / 2) - 12);
         $pdf->Cell($this->contentW, 14, 'تقرير فحص الكهرباء', 0, 1, 'C', false, '', 0, false, 'T', 'M');
         $pdf->SetTextColor(0, 0, 0);
+    }
+
+    private function renderPropertyInfo(TCPDF $pdf, ElectricityReport $report): void
+    {
+        $pdf->SetFont($this->fontBold, '', 14);
+        $pdf->SetTextColor(0, 0, 0);
+        $pdf->Cell($this->contentW, 8, $report->title, 0, 1, 'C');
+
+        $pdf->SetFont($this->font, '', 11);
+        $pdf->SetTextColor(60, 60, 60);
+        $client = trim((string) ($report->client_name ?: ''));
+        $addr = $report->propertyAddress();
+        $line = trim(($client !== '' ? 'العميل: '.$client : '').($addr !== '---' ? ($client !== '' ? '  —  ' : '').$addr : ''));
+        if ($line !== '') {
+            $pdf->MultiCell($this->contentW, 6, $line, 0, 'C', false, 1);
+        }
+        $pdf->SetTextColor(0, 0, 0);
+        $pdf->Ln(4);
     }
 
     private function renderLegend(TCPDF $pdf): void
@@ -244,32 +265,52 @@ class ElectricityReportPdfGenerator
      */
     private function renderImagesRow(TCPDF $pdf, array $images, array &$tempImages, float $innerW, float $xStart): void
     {
-        $perRow = 4;
-        $gap = 3;
+        // Sample report: up to 5 slots per row; unused slots stay empty (no stretch)
+        $perRow = 5;
+        $gap = 2.5;
+        $slotW = ($innerW - ($gap * ($perRow - 1))) / $perRow;
+        $maxH = 48.0;
 
         foreach (array_chunk($images, $perRow) as $rowImages) {
-            $count = count($rowImages);
-            $imgW = ($innerW - ($gap * max(0, $count - 1))) / $count;
-            $imgH = min(52, $imgW * 0.72);
+            $rowH = $maxH;
+            $prepared = [];
 
-            $this->ensureSpace($pdf, $imgH + 4);
-            $y = $pdf->GetY();
-
-            $pdf->setRTL(false);
-            foreach ($rowImages as $i => $imgPath) {
+            foreach ($rowImages as $imgPath) {
                 [$embed, $isTemp] = RasterImageForTcpdf::prepareForEmbedding($imgPath);
                 if ($isTemp) {
                     $tempImages[] = $embed;
                 }
-                $x = $xStart + ($i * ($imgW + $gap));
+                $h = $maxH;
+                $w = $slotW;
+                // Prefer fitting inside the slot while keeping aspect ratio
+                $size = @getimagesize($embed);
+                if (is_array($size) && ($size[0] ?? 0) > 0 && ($size[1] ?? 0) > 0) {
+                    $ratio = $size[0] / $size[1];
+                    $w = min($slotW, $maxH * $ratio);
+                    $h = $w / $ratio;
+                    if ($h > $maxH) {
+                        $h = $maxH;
+                        $w = $h * $ratio;
+                    }
+                }
+                $rowH = max($rowH, $h);
+                $prepared[] = compact('embed', 'w', 'h');
+            }
+
+            $this->ensureSpace($pdf, $rowH + 4);
+            $y = $pdf->GetY();
+
+            $pdf->setRTL(false);
+            foreach ($prepared as $i => $item) {
+                $x = $xStart + ($i * ($slotW + $gap)) + (($slotW - $item['w']) / 2);
                 try {
-                    $pdf->Image($embed, $x, $y, $imgW, $imgH, '', '', '', false, 120, '', false, false, 1);
+                    // Width + height already aspect-correct; border=0
+                    $pdf->Image($item['embed'], $x, $y, $item['w'], $item['h'], '', '', '', false, 150, '', false, false, 0);
                 } catch (Throwable) {
-                    // skip broken image
                 }
             }
             $pdf->setRTL(true);
-            $pdf->SetY($y + $imgH + 2);
+            $pdf->SetY($y + $rowH + 2);
         }
     }
 
@@ -421,11 +462,15 @@ class ElectricityReportPdfGenerator
 
     private function resolveLogoPath(): ?string
     {
-        foreach ([env('REPORT_LOGO_PATH'), 'images/newLog.jpeg', 'images/company-logo.png', 'images/logo.png'] as $candidate) {
-            if (! $candidate) {
-                continue;
-            }
-            $path = public_path($candidate);
+        $candidates = array_filter([
+            config('report.logo_path'),
+            'images/newLog.jpeg',
+            'images/company-logo.png',
+            'images/logo.png',
+        ]);
+
+        foreach ($candidates as $candidate) {
+            $path = public_path((string) $candidate);
             if (is_file($path)) {
                 return $path;
             }
@@ -436,12 +481,22 @@ class ElectricityReportPdfGenerator
 
     private function registerReportFonts(): void
     {
+        static $cachedName = null;
+
+        if (is_string($cachedName) && $cachedName !== '') {
+            $this->font = $cachedName;
+            $this->fontBold = $cachedName;
+
+            return;
+        }
+
         $boldTtf = base_path('resources/fonts/arialbd.ttf');
         if (! is_file($boldTtf)) {
             return;
         }
         $name = \TCPDF_FONTS::addTTFfont($boldTtf, 'TrueTypeUnicode', '', 32);
         if (is_string($name) && $name !== '') {
+            $cachedName = $name;
             $this->font = $name;
             $this->fontBold = $name;
         }
@@ -475,7 +530,8 @@ class ElectricityReportTCPDF extends TCPDF
         $this->setRTL(false);
         if ($this->logoPath && is_readable($this->logoPath)) {
             try {
-                $this->Image($this->logoPath, 14, 7, 22, 14, '', '', '', false, 300);
+                // Height only — keep natural aspect ratio (no squash)
+                $this->Image($this->logoPath, 14, 5, 0, 16, '', '', '', false, 300);
             } catch (Throwable) {
             }
         }
@@ -495,7 +551,7 @@ class ElectricityReportTCPDF extends TCPDF
 
     public function Footer(): void
     {
-        // Cover page has no footer
+        // Cover page has no footer — matches official GIS footer strip
         if ($this->PageNo() <= 1) {
             return;
         }
@@ -505,14 +561,16 @@ class ElectricityReportTCPDF extends TCPDF
         $this->setRTL(false);
 
         $maroon = [128, 0, 0];
-        $rowY = $pageH - 16;
+        $rowY = $pageH - 17;
         $iconSize = 3.4;
         $iconY = $rowY + 0.55;
         $textY = $rowY;
 
         $whatsappIcon = public_path('images/whatsapp_icon.png');
         $emailIcon = public_path('images/email_icon.png');
+        $instagramIcon = public_path('images/instagram.png');
 
+        // Left: WhatsApp | Email | Instagram
         $x = 14.0;
         if (is_file($whatsappIcon)) {
             try {
@@ -537,19 +595,37 @@ class ElectricityReportTCPDF extends TCPDF
         $this->SetFont($this->reportFontBold, '', 7.5);
         $this->SetTextColor($maroon[0], $maroon[1], $maroon[2]);
         $this->SetXY($x, $textY);
-        $this->Cell(42, 4.2, 'infogisgulf@gmail.com', 0, 0, 'L');
+        $this->Cell(38, 4.2, 'infogisgulf@gmail.com', 0, 0, 'L');
 
-        // Center page number
-        $this->SetFont($this->reportFont, '', 8);
-        $this->SetTextColor(120, 0, 0);
-        $this->SetXY($pageW / 2 - 10, $pageH - 12);
-        $this->Cell(20, 4, (string) $this->getAliasNumPage().' / '.$this->getAliasNbPages(), 0, 0, 'C');
-
-        // Right company
+        $x = 79.0;
+        if (is_file($instagramIcon)) {
+            try {
+                $this->Image($instagramIcon, $x, $iconY, $iconSize, $iconSize, '', '', '', false, 300);
+            } catch (Throwable) {
+            }
+        }
+        $x += $iconSize + 1.0;
         $this->SetFont($this->reportFontBold, '', 8);
         $this->SetTextColor($maroon[0], $maroon[1], $maroon[2]);
-        $this->SetXY($pageW - 95, $pageH - 12);
-        $this->Cell(80, 4, 'GIS VALUATION AND EVALUATION', 0, 0, 'R');
+        $this->SetXY($x, $textY);
+        $this->Cell(22, 4.2, 'gis.Bahrain', 0, 0, 'L');
+
+        // Address under contacts
+        $this->SetFont('helvetica', '', 7);
+        $this->SetTextColor($maroon[0], $maroon[1], $maroon[2]);
+        $this->SetXY(14, $pageH - 11.8);
+        $this->Cell(90, 3.2, 'Seef District - Kingdom of Bahrain', 0, 0, 'L');
+
+        // Right: company block (EN + AR + C.R.)
+        $rightW = 86.0;
+        $rightX = $pageW - 14 - $rightW;
+        $this->SetFont($this->reportFontBold, '', 8);
+        $this->SetTextColor($maroon[0], $maroon[1], $maroon[2]);
+        $this->SetXY($rightX, $pageH - 18);
+        $this->Cell($rightW, 3.6, 'GIS VALUATION AND EVALUATION', 0, 2, 'R');
+        $this->Cell($rightW, 3.6, 'جي إي إس للتقييم والتثمين العقاري', 0, 2, 'R');
+        $this->SetFont('helvetica', '', 7);
+        $this->Cell($rightW, 3.0, 'C.R. 160528-1', 0, 0, 'R');
 
         $this->setRTL(true);
         $this->SetTextColor(0, 0, 0);

@@ -243,4 +243,52 @@ class ElectricityReportCrudTest extends TestCase
 
         $this->assertDatabaseMissing('report_sections', ['id' => $a->id]);
     }
+
+    public function test_word_generator_tolerates_missing_logo(): void
+    {
+        $admin = $this->admin();
+        $report = ElectricityReport::query()->create([
+            'user_id' => $admin->id,
+            'title' => 'تقرير بدون شعار',
+            'reference_code' => 'E-NL',
+        ]);
+        $report->load('sections');
+
+        config(['report.logo_path' => 'images/does-not-exist.png']);
+        $generator = new ElectricityReportWordGenerator;
+        $docx = $generator->renderBinary($report);
+
+        $this->assertSame('PK', substr($docx, 0, 2));
+        $this->assertGreaterThan(500, strlen($docx));
+    }
+
+    public function test_section_image_cap_rejects_when_full(): void
+    {
+        Storage::fake('public');
+        config(['report.max_section_images' => 2]);
+
+        $admin = $this->admin();
+        $report = ElectricityReport::query()->create([
+            'user_id' => $admin->id,
+            'title' => 'تقرير',
+        ]);
+
+        $paths = [
+            UploadedFile::fake()->image('a.jpg')->store("electricity-reports/{$report->id}", 'public'),
+            UploadedFile::fake()->image('b.jpg')->store("electricity-reports/{$report->id}", 'public'),
+        ];
+
+        $section = $report->sections()->create([
+            'name' => 'ممتلئ',
+            'images_json' => $paths,
+            'sort_order' => 1,
+        ]);
+
+        $this->actingAs($admin)
+            ->patch(route('admin.reports.sections.update', [$report, $section]), [
+                'name' => 'ممتلئ',
+                'images' => [UploadedFile::fake()->image('c.jpg')],
+            ])
+            ->assertSessionHasErrors('images');
+    }
 }

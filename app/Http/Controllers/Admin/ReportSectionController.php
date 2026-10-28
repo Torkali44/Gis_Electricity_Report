@@ -6,10 +6,12 @@ use App\Http\Controllers\Controller;
 use App\Models\ElectricityReport;
 use App\Models\ReportSection;
 use App\Support\HighlightColor;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 
 class ReportSectionController extends Controller
 {
@@ -19,6 +21,13 @@ class ReportSectionController extends Controller
         $maxOrder = (int) $report->sections()->max('sort_order');
 
         $images = $this->storeUploadedImages($request, $report->id);
+        $maxImages = $this->maxSectionImages();
+        if (count($images) > $maxImages) {
+            foreach (array_slice($images, $maxImages) as $path) {
+                Storage::disk('public')->delete($path);
+            }
+            $images = array_slice($images, 0, $maxImages);
+        }
 
         $report->sections()->create([
             ...$data,
@@ -53,8 +62,26 @@ class ReportSectionController extends Controller
 
         $newImages = $this->storeUploadedImages($request, $report->id);
         $merged = array_values(array_merge($existing, $newImages));
-        // Keep a hard ceiling so storage / Word+PDF generation stay bounded
-        $data['images_json'] = array_slice($merged, 0, 40);
+        $maxImages = $this->maxSectionImages();
+
+        if (count($merged) > $maxImages) {
+            $kept = array_slice($merged, 0, $maxImages);
+            $dropped = array_slice($merged, $maxImages);
+            foreach ($dropped as $path) {
+                // Only delete newly uploaded extras — never wipe older kept images silently
+                if (in_array($path, $newImages, true)) {
+                    Storage::disk('public')->delete($path);
+                }
+            }
+            if (count($kept) < count($existing) + count($newImages) && count($existing) >= $maxImages) {
+                throw ValidationException::withMessages([
+                    'images' => "الحد الأقصى {$maxImages} صورة لكل قسم. احذف صوراً قديمة أولاً.",
+                ]);
+            }
+            $merged = $kept;
+        }
+
+        $data['images_json'] = $merged;
 
         $section->update($data);
 
@@ -71,22 +98,31 @@ class ReportSectionController extends Controller
             'direction' => ['required', Rule::in(['up', 'down'])],
         ]);
 
-        $sections = $report->sections()->orderBy('sort_order')->orderBy('id')->get()->values();
-        $index = $sections->search(fn ($s) => $s->id === $section->id);
-        if ($index === false) {
+        $neighbor = $report->sections()
+            ->when(
+                $data['direction'] === 'up',
+                fn ($q) => $q->where(function ($w) use ($section) {
+                    $w->where('sort_order', '<', $section->sort_order)
+                        ->orWhere(function ($w2) use ($section) {
+                            $w2->where('sort_order', $section->sort_order)->where('id', '<', $section->id);
+                        });
+                })->orderByDesc('sort_order')->orderByDesc('id'),
+                fn ($q) => $q->where(function ($w) use ($section) {
+                    $w->where('sort_order', '>', $section->sort_order)
+                        ->orWhere(function ($w2) use ($section) {
+                            $w2->where('sort_order', $section->sort_order)->where('id', '>', $section->id);
+                        });
+                })->orderBy('sort_order')->orderBy('id')
+            )
+            ->first();
+
+        if (! $neighbor) {
             return back();
         }
 
-        $swapWith = $data['direction'] === 'up' ? $index - 1 : $index + 1;
-        if ($swapWith < 0 || $swapWith >= $sections->count()) {
-            return back();
-        }
-
-        $a = $sections[$index];
-        $b = $sections[$swapWith];
-        $tmp = $a->sort_order;
-        $a->update(['sort_order' => $b->sort_order]);
-        $b->update(['sort_order' => $tmp]);
+        $tmp = $section->sort_order;
+        $section->update(['sort_order' => $neighbor->sort_order]);
+        $neighbor->update(['sort_order' => $tmp]);
 
         return back()->with('status', 'تم إعادة الترتيب.');
     }
@@ -102,9 +138,60 @@ class ReportSectionController extends Controller
             ->with('status', 'تم حذف القسم.');
     }
 
+    /** Replace a section image with an annotated composite (arrows baked in). */
+    public function updateImage(Request $request, ElectricityReport $report, ReportSection $section): RedirectResponse|JsonResponse
+    {
+        $this->assertOwns($report, $section);
+
+        $data = $request->validate([
+            'path' => ['required', 'string', 'max:500'],
+            'composite' => ['required', 'image', 'mimes:jpeg,jpg,png,webp', 'max:15360'],
+        ]);
+
+        $existing = is_array($section->images_json) ? $section->images_json : [];
+        $path = ltrim($data['path'], '/');
+        if (! in_array($path, $existing, true) || ! Storage::disk('public')->exists($path)) {
+            if ($request->wantsJson()) {
+                return response()->json(['ok' => false, 'message' => 'الصورة غير موجودة في هذا القسم.'], 422);
+            }
+
+            return back()->withErrors(['composite' => 'الصورة غير موجودة في هذا القسم.']);
+        }
+
+        $file = $request->file('composite');
+        $ext = strtolower($file->getClientOriginalExtension() ?: 'jpg');
+        if (! in_array($ext, ['jpg', 'jpeg', 'png', 'webp'], true)) {
+            $ext = 'jpg';
+        }
+        $dir = dirname($path);
+        $newPath = $dir.'/'.pathinfo($path, PATHINFO_FILENAME).'_ann_'.uniqid().'.'.$ext;
+        Storage::disk('public')->putFileAs($dir, $file, basename($newPath));
+        Storage::disk('public')->delete($path);
+
+        $section->update([
+            'images_json' => array_values(array_map(
+                fn ($p) => $p === $path ? $newPath : $p,
+                $existing
+            )),
+        ]);
+
+        return $request->wantsJson()
+            ? response()->json(['ok' => true, 'path' => $newPath, 'url' => asset('storage/'.$newPath)])
+            : redirect()
+                ->route('admin.reports.show', $report)
+                ->with('status', 'تم حفظ الصورة مع الأسهم.');
+    }
+
     private function assertOwns(ElectricityReport $report, ReportSection $section): void
     {
         abort_unless($section->electricity_report_id === $report->id, 404);
+    }
+
+    private function maxSectionImages(): int
+    {
+        $max = (int) config('report.max_section_images', 40);
+
+        return max(1, min(80, $max));
     }
 
     /** @return array<string, mixed> */
@@ -120,7 +207,7 @@ class ReportSectionController extends Controller
             'comments.*.text' => ['nullable', 'string', 'max:4000'],
             'comments.*.color' => ['nullable', Rule::in(HighlightColor::all())],
             'images' => ['nullable', 'array', 'max:20'],
-            'images.*' => ['image', 'max:10240'],
+            'images.*' => ['image', 'mimes:jpeg,jpg,png,webp', 'max:10240'],
             // grounding
             'grounding_cable_value' => ['nullable', 'string', 'max:120'],
             'grounding_cable_color' => ['nullable', Rule::in(HighlightColor::all())],
@@ -132,7 +219,7 @@ class ReportSectionController extends Controller
             'voltages.*.color' => ['nullable', Rule::in(HighlightColor::all())],
             // mcb
             'mcb_groups' => ['nullable', 'array', 'max:30'],
-            'mcb_groups.*.elcb' => ['nullable', 'string', 'max:40'],
+            'mcb_groups.*.elcb' => ['nullable', 'string', 'max:120'],
             'mcb_groups.*.have_label_value' => ['nullable', 'string', 'max:40'],
             'mcb_groups.*.have_label_color' => ['nullable', Rule::in(HighlightColor::all())],
             'mcb_groups.*.rows' => ['nullable', 'array', 'max:80'],

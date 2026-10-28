@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Admin\ElectricityReportController;
+use App\Http\Controllers\Admin\ReadyPresetController;
 use App\Http\Controllers\Admin\ReportSectionController;
 use App\Http\Controllers\Auth\LoginController;
 use App\Http\Controllers\HomeController;
@@ -18,12 +19,22 @@ Route::post('/logout', [LoginController::class, 'destroy'])->middleware('auth')-
 Route::middleware(['auth', 'admin'])->prefix('admin')->name('admin.')->group(function (): void {
     Route::get('/', fn () => redirect()->route('admin.reports.index'));
 
-    Route::get('reports/{report}/report.pdf', [ElectricityReportController::class, 'reportPdf'])->name('reports.pdf');
-    Route::get('reports/{report}/report.docx', [ElectricityReportController::class, 'reportWord'])->name('reports.word');
+    Route::get('presets', [ReadyPresetController::class, 'index'])->name('presets.index');
+    Route::post('presets', [ReadyPresetController::class, 'store'])->name('presets.store');
+    Route::patch('presets/{preset}', [ReadyPresetController::class, 'update'])->name('presets.update');
+    Route::delete('presets/{preset}', [ReadyPresetController::class, 'destroy'])->name('presets.destroy');
+
+    Route::get('reports/{report}/report.pdf', [ElectricityReportController::class, 'reportPdf'])
+        ->middleware('throttle:20,1')
+        ->name('reports.pdf');
+    Route::get('reports/{report}/report.docx', [ElectricityReportController::class, 'reportWord'])
+        ->middleware('throttle:20,1')
+        ->name('reports.word');
     Route::resource('reports', ElectricityReportController::class);
 
     Route::post('reports/{report}/sections', [ReportSectionController::class, 'store'])->name('reports.sections.store');
     Route::patch('reports/{report}/sections/{section}', [ReportSectionController::class, 'update'])->name('reports.sections.update');
     Route::patch('reports/{report}/sections/{section}/reorder', [ReportSectionController::class, 'reorder'])->name('reports.sections.reorder');
+    Route::post('reports/{report}/sections/{section}/image', [ReportSectionController::class, 'updateImage'])->name('reports.sections.image');
     Route::delete('reports/{report}/sections/{section}', [ReportSectionController::class, 'destroy'])->name('reports.sections.destroy');
 });
