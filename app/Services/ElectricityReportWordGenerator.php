@@ -20,7 +20,14 @@ class ElectricityReportWordGenerator
 
     public function __construct()
     {
-        $this->logoPath = public_path('images/company-logo.png');
+        // Prefer new logo; fall back to legacy files
+        foreach (['images/newLog.jpeg', 'images/company-logo.png', 'images/company-logo1.png'] as $candidate) {
+            $path = public_path($candidate);
+            if (file_exists($path)) {
+                $this->logoPath = $path;
+                break;
+            }
+        }
     }
 
     public function renderBinary(ElectricityReport $report): string

@@ -421,7 +421,7 @@ class ElectricityReportPdfGenerator
 
     private function resolveLogoPath(): ?string
     {
-        foreach ([env('REPORT_LOGO_PATH'), 'images/company-logo.png', 'images/logo.png'] as $candidate) {
+        foreach ([env('REPORT_LOGO_PATH'), 'images/newLog.jpeg', 'images/company-logo.png', 'images/logo.png'] as $candidate) {
             if (! $candidate) {
                 continue;
             }

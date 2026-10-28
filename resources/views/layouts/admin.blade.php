@@ -52,11 +52,7 @@
     <header class="sticky top-0 z-40 border-b border-white/5 bg-slate-950/90 backdrop-blur-xl">
         <div class="mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 py-3 sm:px-6">
             <a href="{{ route('admin.reports.index') }}" class="flex items-center gap-2 text-lg font-bold text-white sm:text-xl">
-                <span class="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-500 text-slate-950 sm:h-9 sm:w-9">
-                    <svg class="h-4 w-4 sm:h-5 sm:w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M13 10V3L4 14h7v7l9-11h-7z" />
-                    </svg>
-                </span>
+                <img src="{{ asset('images/newLog.jpeg') }}" alt="GIS Logo" class="h-9 w-9 rounded-lg object-contain bg-white p-0.5">
                 <span><span class="text-emerald-500">GIS</span> <span class="hidden xs:inline sm:inline">تقارير الكهرباء</span></span>
             </a>
 
