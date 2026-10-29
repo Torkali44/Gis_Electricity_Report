@@ -6,6 +6,7 @@ use App\Models\ElectricityReport;
 use App\Models\ReportSection;
 use App\Support\HighlightColor;
 use App\Support\RasterImageForTcpdf;
+use App\Support\TcpdfReportFonts;
 use TCPDF;
 use Throwable;
 
@@ -24,103 +25,117 @@ class ElectricityReportPdfGenerator
 
     private float $contentW = 180;
 
-  
-public function renderBinary(ElectricityReport $report): string
-{
-    $prev = ini_get('memory_limit');
-    ini_set('memory_limit', '512M');
+    public function renderBinary(ElectricityReport $report): string
+    {
+        $prev = ini_get('memory_limit');
+        ini_set('memory_limit', '512M');
 
-    set_error_handler(function ($errno, $message, $file) {
-        return str_contains((string) $file, 'tcpdf');
-    });
+        // Narrow: only swallow known non-fatal TCPDF notices during glyph/image ops.
+        // Do not hide failures that prevent font definition loading.
+        set_error_handler(function (int $errno, string $message, string $file): bool {
+            if (! str_contains($file, DIRECTORY_SEPARATOR.'tecnickcom'.DIRECTORY_SEPARATOR.'tcpdf')) {
+                return false;
+            }
+            // Font definition / missing file must surface.
+            if (str_contains($message, 'Could not include font definition file')
+                || str_contains($message, 'font definition file has a bad format')
+                || str_contains($message, 'Unable to')
+            ) {
+                return false;
+            }
 
-    $tempImages = [];
+            return in_array($errno, [E_WARNING, E_NOTICE, E_USER_WARNING, E_USER_NOTICE, E_DEPRECATED, E_USER_DEPRECATED], true);
+        });
 
-    try {
-        $this->registerReportFonts();
+        $tempImages = [];
 
-        $logoPath = $this->resolveLogoPath();
+        try {
+            $registered = $this->registerReportFonts();
 
-        $pdf = new ElectricityReportTCPDF(
-            'P',
-            'mm',
-            'A4',
-            true,
-            'UTF-8',
-            false
-        );
+            $logoPath = $this->resolveLogoPath();
 
-        $pdf->reportNo = $report->reportNumber();
-        $pdf->reportDate = $report->reportInspectionDateFormatted();
-        $pdf->logoPath = $logoPath;
-        $pdf->reportFont = $this->font;
-        $pdf->reportFontBold = $this->fontBold;
+            $pdf = new ElectricityReportTCPDF(
+                'P',
+                'mm',
+                'A4',
+                true,
+                'UTF-8',
+                false
+            );
 
-        $pdf->SetCreator(config('app.name'));
-        $pdf->SetAuthor(config('app.name'));
-        $pdf->SetTitle('تقرير فحص الكهرباء — '.$report->title);
+            // Critical: bind absolute font-definition path so TCPDF does not
+            // look only under vendor/.../fonts (K_PATH_FONTS).
+            TcpdfReportFonts::bindToPdf($pdf, $registered);
 
-        $pdf->SetMargins($this->left, 28, $this->right);
-        $pdf->SetHeaderMargin(6);
-        $pdf->SetFooterMargin(22);
-        $pdf->setRTL(true);
-        $pdf->SetFont($this->font, '', 11);
-        $pdf->setCellPaddings(2, 1.5, 2, 1.5);
-        $pdf->setCellHeightRatio(1.35);
+            $pdf->reportNo = $report->reportNumber();
+            $pdf->reportDate = $report->reportInspectionDateFormatted();
+            $pdf->logoPath = $logoPath;
+            $pdf->reportFont = $this->font;
+            $pdf->reportFontBold = $this->fontBold;
 
-        $this->contentW = $pdf->getPageWidth()
-            - $this->left
-            - $this->right;
+            $pdf->SetCreator(config('app.name'));
+            $pdf->SetAuthor(config('app.name'));
+            $pdf->SetTitle('تقرير فحص الكهرباء — '.$report->title);
 
-        // Page 1: title alone (no header/footer)
-        $pdf->setPrintHeader(false);
-        $pdf->setPrintFooter(false);
-        $pdf->SetAutoPageBreak(false, 0);
-        $pdf->AddPage();
+            $pdf->SetMargins($this->left, 28, $this->right);
+            $pdf->SetHeaderMargin(6);
+            $pdf->SetFooterMargin(22);
+            $pdf->setRTL(true);
+            $pdf->SetFont($this->font, '', 11);
+            $pdf->setCellPaddings(2, 1.5, 2, 1.5);
+            $pdf->setCellHeightRatio(1.35);
 
-        $this->renderCoverTitlePage($pdf);
+            $this->contentW = $pdf->getPageWidth()
+                - $this->left
+                - $this->right;
 
-        // Page 2+: content with header/footer
-        $pdf->setPrintHeader(true);
-        $pdf->setPrintFooter(true);
-        $pdf->SetAutoPageBreak(true, 28);
-        $pdf->AddPage();
+            // Page 1: title alone (no header/footer)
+            $pdf->setPrintHeader(false);
+            $pdf->setPrintFooter(false);
+            $pdf->SetAutoPageBreak(false, 0);
+            $pdf->AddPage();
 
-        // Property / client info under the cover
-        $this->renderPropertyInfo($pdf, $report);
+            $this->renderCoverTitlePage($pdf);
 
-        $sections = $report->sections;
+            // Page 2+: content with header/footer
+            $pdf->setPrintHeader(true);
+            $pdf->setPrintFooter(true);
+            $pdf->SetAutoPageBreak(true, 28);
+            $pdf->AddPage();
 
-        $hasGrounding = $sections->contains(
-            fn (ReportSection $s) =>
-                $s->has_table && $s->table_type === 'grounding_main'
-        );
+            // Property / client info under the cover
+            $this->renderPropertyInfo($pdf, $report);
 
-        if ($hasGrounding) {
-            $this->renderLegend($pdf);
-        }
+            $sections = $report->sections;
 
-        foreach ($sections as $sec) {
-            $this->ensureSpace($pdf, 28);
-            $this->renderSection($pdf, $sec, $tempImages);
-        }
+            $hasGrounding = $sections->contains(
+                fn (ReportSection $s) => $s->has_table && $s->table_type === 'grounding_main'
+            );
 
-        return $pdf->Output('', 'S');
-    } finally {
-        restore_error_handler();
+            if ($hasGrounding) {
+                $this->renderLegend($pdf);
+            }
 
-        foreach ($tempImages as $tmp) {
-            if (is_string($tmp) && is_file($tmp)) {
-                @unlink($tmp);
+            foreach ($sections as $sec) {
+                $this->ensureSpace($pdf, 28);
+                $this->renderSection($pdf, $sec, $tempImages);
+            }
+
+            return $pdf->Output('', 'S');
+        } finally {
+            restore_error_handler();
+
+            foreach ($tempImages as $tmp) {
+                if (is_string($tmp) && is_file($tmp)) {
+                    @unlink($tmp);
+                }
+            }
+
+            if ($prev !== false) {
+                ini_set('memory_limit', $prev);
             }
         }
-
-        if ($prev !== false) {
-            ini_set('memory_limit', $prev);
-        }
     }
-}
-
 
     private function renderCoverTitlePage(TCPDF $pdf): void
     {
@@ -499,41 +514,20 @@ public function renderBinary(ElectricityReport $report): string
         return null;
     }
 
-    private function registerReportFonts(): void
+    /**
+     * Ensure Unicode Arial Bold is available under storage/app/tcpdf-fonts.
+     * Both body and bold slots use the same family to preserve the existing
+     * report look (the previous implementation also used arialbd for both).
+     *
+     * @return array{family: string, definition: string}
+     */
+    private function registerReportFonts(): array
     {
-        static $cachedName = null;
+        $registered = TcpdfReportFonts::ensureArialBold();
+        $this->font = $registered['family'];
+        $this->fontBold = $registered['family'];
 
-        if (is_string($cachedName) && $cachedName !== '') {
-            $this->font = $cachedName;
-            $this->fontBold = $cachedName;
-
-            return;
-        }
-
-        $boldTtf = base_path('resources/fonts/arialbd.ttf');
-        if (! is_file($boldTtf)) {
-            return;
-        }
-        $fontOutputPath = storage_path('app/tcpdf-fonts').DIRECTORY_SEPARATOR;
-
-        if (! is_dir($fontOutputPath) || ! is_writable($fontOutputPath)) {
-            throw new \RuntimeException(
-                'TCPDF font output directory is not writable.'
-            );
-        }
-        
-        $name = \TCPDF_FONTS::addTTFfont(
-            $boldTtf,
-            'TrueTypeUnicode',
-            '',
-            32,
-            $fontOutputPath
-        );
-                if (is_string($name) && $name !== '') {
-            $cachedName = $name;
-            $this->font = $name;
-            $this->fontBold = $name;
-        }
+        return $registered;
     }
 }
 

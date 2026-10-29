@@ -34,6 +34,7 @@ class AppServiceProvider extends ServiceProvider
     {
         $dirs = [
             storage_path('app/public/electricity-reports'),
+            storage_path('app/tcpdf-fonts'),
             storage_path('framework/sessions'),
             storage_path('framework/cache/data'),
             storage_path('logs'),
